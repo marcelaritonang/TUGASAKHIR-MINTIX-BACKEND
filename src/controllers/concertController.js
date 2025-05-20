@@ -56,9 +56,11 @@ exports.getConcert = async (req, res) => {
 };
 
 // Create a concert
+// Perbaiki di controllers/concertController.js
 exports.createConcert = async (req, res) => {
     try {
-        console.log("Request body:", req.body);
+        console.log("Request body untuk create concert:", req.body);
+        console.log("File yang diupload:", req.file);
 
         const {
             name,
@@ -107,13 +109,30 @@ exports.createConcert = async (req, res) => {
         }
 
         // Log sebelum menyimpan
-        console.log("Saving concert:", newConcert);
+        console.log("Membuat concert baru:", {
+            name: newConcert.name,
+            venue: newConcert.venue,
+            status: newConcert.status
+        });
 
         // Save to database
         const concert = await newConcert.save();
 
-        // Log setelah menyimpan
-        console.log("Concert saved:", concert);
+        // Log ID untuk memastikan
+        console.log("Concert berhasil dibuat dengan ID:", concert._id.toString());
+        console.log("Status concert:", concert.status);
+
+        // Langsung coba cari kembali untuk memastikan tersimpan dengan benar
+        const savedConcert = await Concert.findById(concert._id);
+        if (savedConcert) {
+            console.log("Concert ditemukan kembali setelah save:", savedConcert.name);
+        } else {
+            console.log("WARNING: Concert tidak ditemukan setelah save!");
+        }
+
+        // Untuk memastikan, log semua konser yang pending
+        const pendingConcerts = await Concert.find({ status: 'pending' });
+        console.log(`Total konser pending setelah save: ${pendingConcerts.length}`);
 
         // Pastikan untuk mengembalikan data konser yang berhasil dibuat
         res.json(concert);
@@ -126,36 +145,74 @@ exports.createConcert = async (req, res) => {
 // Admin: Get pending concerts
 exports.getPendingConcerts = async (req, res) => {
     try {
-        const concerts = await Concert.find({ status: 'pending' })
-            .sort({ createdAt: -1 });
+        console.log("Admin mengakses daftar konser pending");
 
-        console.log("Pending concerts:", concerts);
+        // Gunakan $in untuk mencocokkan status 'pending' dan 'info_requested'
+        const concerts = await Concert.find({
+            status: { $in: ['pending', 'info_requested'] }
+        }).sort({ createdAt: -1 });
+
+        console.log(`Ditemukan ${concerts.length} konser pending`);
+
+        // Log daftar konser yang ditemukan untuk debugging
+        if (concerts.length > 0) {
+            concerts.forEach((concert, index) => {
+                console.log(`${index + 1}. ${concert.name} (ID: ${concert._id.toString()})`);
+            });
+        } else {
+            console.log("Tidak ada konser pending yang ditemukan");
+        }
+
         res.json(concerts);
     } catch (err) {
-        console.error(err.message);
+        console.error("Error saat mengambil konser pending:", err.message);
         res.status(500).send('Server error');
     }
 };
-
 // Admin: Approve concert
+// Perbaiki di controllers/concertController.js
 exports.approveConcert = async (req, res) => {
     try {
-        console.log(`Request untuk approve concert ${req.params.id} dari admin ${req.user.walletAddress}`);
+        console.log(`Request untuk approve concert dengan ID: ${req.params.id}`);
+        console.log("Tipe data ID:", typeof req.params.id);
+        console.log("Panjang ID:", req.params.id.length);
 
-        // Cek format ID valid
-        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-            console.log("Format ObjectId tidak valid:", req.params.id);
-            return res.status(400).json({ msg: 'Format ID concert tidak valid' });
+        // Periksa apakah ID memiliki format yang valid
+        const id = req.params.id;
+        if (!id || (id.length !== 24 && !mongoose.Types.ObjectId.isValid(id))) {
+            console.log("ID tidak valid:", id);
+            return res.status(400).json({ msg: 'Format ID konser tidak valid', providedId: id });
         }
 
-        const concert = await Concert.findById(req.params.id);
+        // Coba cari dengan exact match terlebih dahulu
+        let concert = await Concert.findById(id);
+
+        // Jika tidak ditemukan, coba cari konser yang ID-nya diawali dengan string yang diberikan
+        if (!concert && id.length < 24) {
+            console.log(`ID ${id} tidak ditemukan, mencoba pencarian dengan awalan...`);
+            const regex = new RegExp(`^${id}`);
+            const concerts = await Concert.find({ _id: { $regex: regex } });
+
+            if (concerts.length === 1) {
+                // Jika ditemukan tepat satu konser, gunakan itu
+                concert = concerts[0];
+                console.log(`Menemukan satu konser dengan ID yang dimulai dengan ${id}: ${concert._id}`);
+            } else if (concerts.length > 1) {
+                // Jika ditemukan lebih dari satu, kembalikan error
+                console.log(`Ditemukan ${concerts.length} konser dengan ID yang dimulai dengan ${id}`);
+                return res.status(400).json({
+                    msg: 'ID tidak spesifik, ditemukan beberapa konser',
+                    matches: concerts.map(c => ({ id: c._id, name: c.name }))
+                });
+            }
+        }
 
         if (!concert) {
-            console.log("Concert tidak ditemukan:", req.params.id);
+            console.log("Konser tidak ditemukan dengan ID:", id);
             return res.status(404).json({ msg: 'Concert not found' });
         }
 
-        console.log("Concert ditemukan:", concert.name);
+        console.log("Konser ditemukan:", concert.name);
 
         // Ubah status
         concert.status = 'approved';
@@ -173,14 +230,14 @@ exports.approveConcert = async (req, res) => {
             timestamp: Date.now()
         });
 
-        // Save to database
+        // Simpan ke database
         await concert.save();
-        console.log("Concert berhasil disetujui");
+        console.log("Konser berhasil disetujui");
 
         res.json(concert);
     } catch (err) {
-        console.error("Error pada approveConcert:", err);
-        res.status(500).json({ msg: 'Server error', error: err.message });
+        console.error("Error saat menyetujui konser:", err);
+        res.status(500).json({ msg: 'Server error', error: err.message, stack: err.stack });
     }
 };
 
