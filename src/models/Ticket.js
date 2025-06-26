@@ -1,4 +1,4 @@
-// models/Ticket.js
+// models/Ticket.js - FIXED VERSION with proper indexing
 const mongoose = require('mongoose');
 const Schema = mongoose.Schema;
 
@@ -18,7 +18,8 @@ const TransactionSchema = new Schema({
     mintAddress: String,
     ticketAddress: String,
     tokenAccountAddress: String,
-    price: Number
+    price: Number,
+    metadata: Schema.Types.Mixed
 });
 
 const TicketSchema = new Schema({
@@ -29,6 +30,10 @@ const TicketSchema = new Schema({
         index: true
     },
     sectionName: {
+        type: String,
+        required: true
+    },
+    seatNumber: {
         type: String,
         required: true
     },
@@ -46,16 +51,32 @@ const TicketSchema = new Schema({
         enum: ['minted', 'transferred', 'used', 'refunded'],
         default: 'minted'
     },
-    seatNumber: String,
-    // Kolom untuk data blockchain
+
+    // Blockchain information - ENHANCED
     transactionSignature: {
         type: String,
         index: true
-    },  // Tanda tangan transaksi Solana (SOL transfer atau smart contract)
-    mintAddress: String,           // Alamat mint NFT
-    ticketAddress: String,         // Alamat akun tiket di blockchain
-    tokenAccountAddress: String,   // Alamat token account
-    concertAddress: String,        // Alamat akun konser di blockchain
+    },
+    mintAddress: String,
+    ticketAddress: String,
+    tokenAccountAddress: String,
+    concertAddress: String,
+
+    // Enhanced metadata for blockchain info
+    metadata: {
+        qrCode: String,
+        qrCodeUrl: String,
+        ticketDesign: String,
+        specialAttributes: [String],
+        tier: String,
+        blockchainNetwork: {
+            type: String,
+            default: 'solana-testnet'
+        }
+    },
+
+    // Security hash for verification
+    securityHash: String,
 
     // Flag untuk tiket dengan konser yang hilang
     hasMissingConcert: {
@@ -68,11 +89,10 @@ const TicketSchema = new Schema({
         type: Boolean,
         default: false
     },
-    verifiedAt: {
-        type: Date
-    },
+    verifiedAt: Date,
+    verifiedBy: String,
 
-    // Secondary market fields - BARU
+    // Secondary market fields
     listingPrice: {
         type: Number,
         default: 0
@@ -81,21 +101,18 @@ const TicketSchema = new Schema({
         type: Boolean,
         default: false
     },
-    listingDate: {
-        type: Date
-    },
+    listingDate: Date,
     isPrimary: {
         type: Boolean,
-        default: true // True if primary market (minted directly), false if secondary (resold)
+        default: true
     },
-    paymentRecipient: {
-        type: String // Record who received the payment (creator or reseller)
-    },
+    paymentRecipient: String,
     previousOwners: [{
         address: String,
         fromDate: Date,
         toDate: Date,
-        transactionSignature: String
+        transactionSignature: String,
+        salePrice: Number
     }],
 
     // Timestamps
@@ -112,10 +129,48 @@ const TicketSchema = new Schema({
     transactionHistory: [TransactionSchema]
 });
 
+// CRITICAL: Add compound unique index to prevent duplicate seats
+TicketSchema.index({
+    concertId: 1,
+    sectionName: 1,
+    seatNumber: 1
+}, {
+    unique: true,
+    name: 'unique_seat_per_concert'
+});
+
+// Additional useful indexes
+TicketSchema.index({ owner: 1, status: 1 });
+TicketSchema.index({ isListed: 1, listingPrice: 1 });
+TicketSchema.index({ transactionSignature: 1 }, { sparse: true });
+
 // Pre-save hook untuk update timestamp
 TicketSchema.pre('save', function (next) {
     this.updatedAt = Date.now();
+
+    // Generate security hash if not exists
+    if (!this.securityHash) {
+        this.securityHash = `sec_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+    }
+
     next();
 });
+
+// Virtual for QR code data
+TicketSchema.virtual('qrCodeData').get(function () {
+    return {
+        ticketId: this._id,
+        concertId: this.concertId,
+        sectionName: this.sectionName,
+        seatNumber: this.seatNumber,
+        owner: this.owner,
+        transactionSignature: this.transactionSignature,
+        mintAddress: this.mintAddress,
+        securityHash: this.securityHash
+    };
+});
+
+// Ensure virtual fields are serialized
+TicketSchema.set('toJSON', { virtuals: true });
 
 module.exports = mongoose.model('Ticket', TicketSchema);

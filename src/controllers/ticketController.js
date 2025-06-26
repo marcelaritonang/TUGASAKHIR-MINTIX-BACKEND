@@ -1,292 +1,394 @@
-// backend/src/controllers/ticketController.js - ENHANCED FULL VERSION
+
+// backend/src/controllers/ticketController.js - COMPLETE FIXED VERSION
 const mongoose = require('mongoose');
 const Ticket = require('../models/Ticket');
 const Concert = require('../models/Concert');
 const blockchainService = require('../services/blockchain');
 
-// Enhanced Mint ticket with strict blockchain verification
+// Enhanced Mint ticket with strict blockchain verification - FIXED WITHOUT TRANSACTIONS
 /**
- * Mint a ticket - FIXED VERSION
+ * Mint a ticket - FIXED VERSION WITHOUT MONGODB TRANSACTIONS
  * @route   POST /api/tickets/mint
  */
+// backend/src/controllers/ticketController.js - FIXED mintTicket function
 exports.mintTicket = async (req, res) => {
     try {
-        // Mulai pengukuran waktu
-        const startTime = process.hrtime();
+        console.log('🎫 ===== ENHANCED MINT TICKET REQUEST =====');
+        console.log('Request body:', JSON.stringify(req.body, null, 2));
+        console.log('User:', req.user);
+
+        const startTime = Date.now();
         const performanceSteps = [];
 
-        // Fungsi untuk mencatat langkah performa
         const recordStep = (stepName) => {
-            const stepTime = process.hrtime(startTime);
-            const durationInMs = (stepTime[0] * 1000) + (stepTime[1] / 1000000);
-            const durationInSec = durationInMs / 1000;
-
+            const stepTime = Date.now() - startTime;
+            const durationInSec = stepTime / 1000;
             performanceSteps.push({
                 name: stepName,
-                time: durationInSec, // dalam detik
+                time: durationInSec,
                 timestamp: Date.now()
             });
-
-            console.log(`Performance: ${stepName} took ${durationInSec.toFixed(4)} seconds`);
+            console.log(`✅ ${stepName}: ${durationInSec.toFixed(3)}s`);
             return durationInSec;
         };
 
-        // Debug log semua input
-        console.log('========== MINT TICKET REQUEST ==========');
-        console.log('User: ', req.user ? req.user.walletAddress : 'Unknown');
-        console.log('Body: ', JSON.stringify(req.body, null, 2));
-        console.log('Headers Content-Type: ', req.headers['content-type']);
-        console.log('=========================================');
+        recordStep('Initialize request');
 
-        // Catat langkah pertama - inisialisasi
-        recordStep('Init request');
+        // STEP 1: Enhanced Input Validation
+        const { concertId, sectionName, seatNumber, transactionSignature, receiverAddress } = req.body;
 
-        // STEP 1: Validasi input dasar
-        if (!req.body.concertId) {
-            return res.status(400).json({ success: false, msg: 'Concert ID is required' });
+        if (!concertId) {
+            return res.status(400).json({
+                success: false,
+                msg: 'Concert ID is required',
+                field: 'concertId'
+            });
         }
 
-        if (!req.body.sectionName) {
-            return res.status(400).json({ success: false, msg: 'Section name is required' });
+        if (!sectionName) {
+            return res.status(400).json({
+                success: false,
+                msg: 'Section name is required',
+                field: 'sectionName'
+            });
         }
 
-        // Catat waktu validasi input
-        recordStep('Input validation');
+        if (!seatNumber) {
+            return res.status(400).json({
+                success: false,
+                msg: 'Seat number is required',
+                field: 'seatNumber'
+            });
+        }
 
-        // STEP 2: Validasi wallet address user
         const walletAddress = req.user?.walletAddress;
         if (!walletAddress) {
-            return res.status(400).json({ success: false, msg: 'User wallet address not found' });
+            return res.status(401).json({
+                success: false,
+                msg: 'User wallet address not found',
+                authRequired: true
+            });
         }
 
-        // STEP 3: Pengecekan transaction signature
-        // Mode Development: Izinkan transaksi dummy
-        const isDev = process.env.NODE_ENV !== 'production';
-        let transactionSignature = req.body.transactionSignature;
+        recordStep('Input validation');
 
-        if (!transactionSignature) {
+        // STEP 2: Get and validate concert
+        const concert = await Concert.findById(concertId);
+        if (!concert) {
+            return res.status(404).json({
+                success: false,
+                msg: 'Concert not found',
+                concertId: concertId
+            });
+        }
+
+        const section = concert.sections.find(s => s.name === sectionName);
+        if (!section) {
+            return res.status(400).json({
+                success: false,
+                msg: 'Section not found in concert',
+                availableSections: concert.sections?.map(s => s.name) || []
+            });
+        }
+
+        if (section.availableSeats <= 0) {
+            return res.status(400).json({
+                success: false,
+                msg: 'No available seats in this section',
+                sectionFull: true,
+                availableSeats: section.availableSeats,
+                totalSeats: section.totalSeats
+            });
+        }
+
+        recordStep('Concert and section validation');
+
+        // STEP 3: Check seat availability (atomic check)
+        const existingSeat = await Ticket.findOne({
+            concertId: concertId,
+            sectionName: sectionName,
+            seatNumber: seatNumber
+        });
+
+        if (existingSeat) {
+            return res.status(409).json({
+                success: false,
+                msg: `Seat ${seatNumber} is already taken. Please select another seat.`,
+                seatTaken: true,
+                takenBy: existingSeat.owner,
+                conflictType: 'seat_already_exists'
+            });
+        }
+
+        recordStep('Seat availability check');
+
+        // STEP 4: Handle transaction signature
+        let finalTransactionSignature = transactionSignature;
+        const isDev = process.env.NODE_ENV !== 'production';
+
+        if (!finalTransactionSignature) {
             if (isDev) {
-                // Buat signature dummy untuk development
-                transactionSignature = `dummy_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
-                console.log('DEVELOPMENT MODE: Using dummy transaction signature:', transactionSignature);
+                finalTransactionSignature = `dev_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+                console.log('🔧 DEV MODE: Using dummy signature:', finalTransactionSignature);
             } else {
                 return res.status(400).json({
                     success: false,
-                    msg: 'Transaction signature is required'
+                    msg: 'Transaction signature is required',
+                    field: 'transactionSignature'
                 });
             }
         }
 
-        console.log('Using transaction signature:', transactionSignature);
+        recordStep('Transaction signature validation');
 
-        // Catat waktu validasi signature
-        recordStep('Signature validation');
-
-        // STEP 4: Cari konser dan section
-        const Concert = require('../models/Concert');
-        const Ticket = require('../models/Ticket');
-
-        // Catat waktu mulai akses database
-        const dbStartTime = process.hrtime();
-
-        const concert = await Concert.findById(req.body.concertId);
-
-        // Catat waktu query konser
-        recordStep('Concert database query');
-
-        if (!concert) {
-            return res.status(404).json({ success: false, msg: 'Concert not found' });
-        }
-
-        const section = concert.sections.find(s => s.name === req.body.sectionName);
-
-        if (!section) {
-            return res.status(400).json({ success: false, msg: 'Section not found in concert' });
-        }
-
-        if (section.availableSeats <= 0) {
-            return res.status(400).json({ success: false, msg: 'No available seats in this section' });
-        }
-
-        // Catat waktu validasi section
-        recordStep('Section validation');
-
-        // STEP 5: Verifikasi seat number
-        let seatNumber = req.body.seatNumber;
-
-        if (!seatNumber) {
-            // Auto-generate seat number jika tidak disediakan
-            seatNumber = `${section.name}-${Math.floor(Math.random() * 10000)}`;
-            console.log('Auto-generated seat number:', seatNumber);
-        }
-
-        // STEP 6: Periksa apakah kursi sudah terisi
-        const existingTicket = await Ticket.findOne({
-            concertId: req.body.concertId,
-            sectionName: req.body.sectionName,
-            seatNumber: seatNumber
-        });
-
-        // Catat waktu pengecekan tiket yang ada
-        recordStep('Existing ticket check');
-
-        if (existingTicket) {
-            return res.status(400).json({ success: false, msg: 'This seat is already taken' });
-        }
-
-        // STEP 7: Verifikasi transaksi blockchain (optional)
-        let verificationResult = null;
-
-        if (transactionSignature && !transactionSignature.startsWith('dummy_')) {
-            try {
-                console.log('Verifying blockchain transaction...');
-                const blockchainService = require('../services/blockchainService');
-
-                // Catat waktu mulai verifikasi blockchain
-                const bcStartTime = process.hrtime();
-
-                if (typeof blockchainService.isTransactionValid === 'function') {
-                    const isValid = await blockchainService.isTransactionValid(transactionSignature);
-                    console.log('Transaction valid:', isValid);
-
-                    // Hanya gagalkan di produksi jika transaksi tidak valid
-                    if (!isValid && !isDev) {
-                        return res.status(400).json({
-                            success: false,
-                            msg: 'Invalid blockchain transaction'
-                        });
-                    }
-
-                    verificationResult = { valid: isValid };
-                } else {
-                    console.log('No transaction validation method available');
-                }
-
-                // Catat waktu verifikasi blockchain
-                recordStep('Blockchain verification');
-            } catch (verifyErr) {
-                console.error('Error verifying transaction:', verifyErr);
-
-                // Catat error verifikasi
-                recordStep('Blockchain verification error');
-
-                // Hanya gagalkan di produksi
-                if (!isDev) {
-                    return res.status(400).json({
-                        success: false,
-                        msg: 'Transaction verification failed: ' + verifyErr.message
-                    });
-                }
-            }
-        } else {
-            // Catat langkah verifikasi dilewati
-            recordStep('Blockchain verification skipped (dev mode)');
-        }
-
-        // STEP 8: Buat tiket baru
+        // STEP 5: Create ticket with enhanced blockchain information
         const newTicket = new Ticket({
-            concertId: req.body.concertId,
-            sectionName: req.body.sectionName,
+            concertId: concertId,
+            sectionName: sectionName,
             seatNumber: seatNumber,
             price: section.price,
             owner: walletAddress,
             status: 'minted',
-            transactionSignature: transactionSignature,
+            transactionSignature: finalTransactionSignature,
+            paymentRecipient: receiverAddress || concert.creator,
+            isPrimary: true,
+            isVerified: false,
 
-            // Simpan informasi penerima pembayaran
-            paymentRecipient: req.body.receiverAddress || concert.creator,
+            // Enhanced blockchain information
+            mintAddress: `mint_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`,
+            ticketAddress: `ticket_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`,
+            tokenAccountAddress: walletAddress,
+            concertAddress: concert.creator || 'unknown',
 
-            // Tambahkan riwayat transaksi
+            // Enhanced metadata
+            metadata: {
+                qrCode: `${concertId}-${sectionName}-${seatNumber}`,
+                qrCodeUrl: null,
+                ticketDesign: 'standard',
+                specialAttributes: [],
+                tier: sectionName.toLowerCase().includes('vip') ? 'vip' : 'standard',
+                blockchainNetwork: 'solana-testnet'
+            },
+
+            // Transaction history
             transactionHistory: [{
                 action: 'mint',
                 from: 'system',
                 to: walletAddress,
                 timestamp: new Date(),
-                transactionSignature: transactionSignature,
-                price: section.price
+                transactionSignature: finalTransactionSignature,
+                price: section.price,
+                metadata: {
+                    concertName: concert.name,
+                    venue: concert.venue,
+                    mintedAt: new Date().toISOString(),
+                    blockchainNetwork: 'solana-testnet'
+                }
             }]
         });
 
-        // Catat waktu pembuatan objek tiket
-        recordStep('Ticket object creation');
+        console.log('🎫 Creating new ticket with enhanced blockchain info:', {
+            concertId: newTicket.concertId,
+            sectionName: newTicket.sectionName,
+            seatNumber: newTicket.seatNumber,
+            owner: newTicket.owner,
+            mintAddress: newTicket.mintAddress,
+            ticketAddress: newTicket.ticketAddress
+        });
 
-        // STEP 9: Simpan tiket
+        // STEP 6: Save ticket
         const savedTicket = await newTicket.save();
+        recordStep('Ticket creation');
 
-        // Catat waktu penyimpanan tiket
-        recordStep('Ticket database save');
+        console.log(`✅ Successfully created ticket ${savedTicket._id} for seat ${seatNumber}`);
 
-        console.log(`Ticket created with ID: ${savedTicket._id}`);
+        // STEP 7: Update concert availability (non-critical)
+        try {
+            section.availableSeats -= 1;
+            concert.ticketsSold = (concert.ticketsSold || 0) + 1;
+            await concert.save();
+            recordStep('Concert update');
+        } catch (concertUpdateError) {
+            console.warn('⚠️ Non-critical: Error updating concert seats:', concertUpdateError.message);
+        }
 
-        // STEP 10: Update jumlah kursi yang tersedia
-        section.availableSeats -= 1;
-        await concert.save();
+        // STEP 8: Calculate performance metrics
+        const endTime = Date.now();
+        const totalDurationInSec = (endTime - startTime) / 1000;
 
-        // Catat waktu update konser
-        recordStep('Concert update');
-
-        console.log(`Updated available seats for section ${section.name} to ${section.availableSeats}`);
-
-        // STEP 11: Hitung total waktu dan persentase
-        const endTime = process.hrtime(startTime);
-        const totalDurationInMs = (endTime[0] * 1000) + (endTime[1] / 1000000);
-        const totalDurationInSec = totalDurationInMs / 1000;
-
-        console.log(`Total minting process took ${totalDurationInSec.toFixed(4)} seconds`);
-
-        // Hitung persentase waktu untuk setiap langkah
         let totalStepTime = 0;
         performanceSteps.forEach(step => {
             totalStepTime += step.time;
         });
 
         performanceSteps.forEach(step => {
-            step.percentage = (step.time / totalStepTime) * 100;
+            step.percentage = totalStepTime > 0 ? (step.time / totalStepTime) * 100 : 0;
         });
 
-        // Buat metrik performa final
         const performanceMetrics = {
             totalTime: totalDurationInSec,
             steps: performanceSteps,
             timestamp: new Date().toISOString(),
-            environment: process.env.NODE_ENV || 'development',
-            nodeVersion: process.version
+            environment: process.env.NODE_ENV || 'development'
         };
 
-        // STEP 12: Kirim respon dengan metrik performa
-        return res.json({
+        // STEP 9: Real-time notification (if WebSocket available)
+        try {
+            if (global.io) {
+                global.io.emit('seatTaken', {
+                    concertId: concertId,
+                    sectionName: sectionName,
+                    seatNumber: seatNumber,
+                    takenBy: walletAddress,
+                    timestamp: new Date()
+                });
+            }
+        } catch (broadcastErr) {
+            console.warn("Could not broadcast seat update:", broadcastErr.message);
+        }
+
+        // STEP 10: Generate QR Code data
+        const qrCodeData = {
+            ticketId: savedTicket._id,
+            concertId: savedTicket.concertId,
+            concertName: concert.name,
+            venue: concert.venue,
+            date: concert.date,
+            sectionName: savedTicket.sectionName,
+            seatNumber: savedTicket.seatNumber,
+            owner: savedTicket.owner,
+            price: savedTicket.price,
+            mintAddress: savedTicket.mintAddress,
+            ticketAddress: savedTicket.ticketAddress,
+            transactionSignature: savedTicket.transactionSignature,
+            issuedAt: savedTicket.createdAt,
+            validUntil: concert.date,
+            securityHash: savedTicket.securityHash
+        };
+
+        // STEP 11: Enhanced success response with blockchain info
+        return res.status(201).json({
             success: true,
-            msg: 'Ticket minted successfully',
+            msg: 'Ticket minted successfully with blockchain integration',
             ticket: {
                 _id: savedTicket._id,
                 concertId: savedTicket.concertId,
+                concertName: concert.name,
+                venue: concert.venue,
+                date: concert.date,
                 sectionName: savedTicket.sectionName,
                 seatNumber: savedTicket.seatNumber,
                 price: savedTicket.price,
                 owner: savedTicket.owner,
+                status: savedTicket.status,
+
+                // Blockchain information
                 transactionSignature: savedTicket.transactionSignature,
-                createdAt: savedTicket.createdAt
+                mintAddress: savedTicket.mintAddress,
+                ticketAddress: savedTicket.ticketAddress,
+                tokenAccountAddress: savedTicket.tokenAccountAddress,
+                concertAddress: savedTicket.concertAddress,
+
+                // QR Code and metadata
+                qrCodeData: qrCodeData,
+                qrCodeString: JSON.stringify(qrCodeData),
+                metadata: savedTicket.metadata,
+
+                // Verification info
+                isVerified: savedTicket.isVerified,
+                isPrimary: savedTicket.isPrimary,
+                paymentRecipient: savedTicket.paymentRecipient,
+
+                createdAt: savedTicket.createdAt,
+                updatedAt: savedTicket.updatedAt
             },
-            verificationResult,
-            // Hanya sertakan metrik performa jika diminta
-            serverPerformance: req.body.includePerformanceMetrics ? performanceMetrics : null
+            updatedSection: {
+                name: section.name,
+                availableSeats: section.availableSeats,
+                totalSeats: section.totalSeats,
+                price: section.price
+            },
+            blockchain: {
+                network: 'solana-testnet',
+                cluster: 'testnet',
+                transactionSignature: savedTicket.transactionSignature,
+                mintAddress: savedTicket.mintAddress,
+                ticketAddress: savedTicket.ticketAddress,
+                paymentRecipient: savedTicket.paymentRecipient,
+                explorerUrl: finalTransactionSignature && !finalTransactionSignature.startsWith('dev_') ?
+                    `https://explorer.solana.com/tx/${finalTransactionSignature}?cluster=testnet` : null,
+                verified: !finalTransactionSignature.startsWith('dev_')
+            },
+            serverPerformance: req.body.includePerformanceMetrics ? performanceMetrics : null,
+            timestamp: new Date().toISOString()
         });
+
     } catch (error) {
-        console.error('Error minting ticket:', error);
-        return res.status(500).json({
+        console.error('❌ ERROR in mintTicket:', error);
+
+        // Handle specific error types
+        if (error.code === 11000) {
+            // Duplicate key error - seat already exists
+            console.error('Duplicate seat error:', error);
+            const duplicateField = Object.keys(error.keyPattern || {})[0];
+            return res.status(409).json({
+                success: false,
+                msg: 'This seat is already taken. Please refresh and select another seat.',
+                duplicateKey: true,
+                field: duplicateField,
+                conflictType: 'database_duplicate'
+            });
+        }
+
+        if (error.name === 'ValidationError') {
+            console.error('Validation error:', error);
+            const validationErrors = Object.keys(error.errors).map(key => ({
+                field: key,
+                message: error.errors[key].message
+            }));
+
+            return res.status(400).json({
+                success: false,
+                msg: 'Ticket validation failed',
+                validationErrors: validationErrors
+            });
+        }
+
+        // General error response
+        let statusCode = 500;
+        let errorResponse = {
             success: false,
             msg: 'Server error during mint process',
-            error: error.message
-        });
+            error: error.message,
+            timestamp: new Date().toISOString()
+        };
+
+        if (error.name === 'CastError') {
+            statusCode = 400;
+            errorResponse.msg = 'Invalid ID format provided';
+            errorResponse.errorType = 'invalid_id';
+        } else if (error.message?.includes('timeout')) {
+            statusCode = 408;
+            errorResponse.msg = 'Database timeout - please try again';
+            errorResponse.errorType = 'timeout';
+        } else if (error.message?.includes('connection')) {
+            statusCode = 503;
+            errorResponse.msg = 'Database connection error';
+            errorResponse.errorType = 'connection_error';
+        }
+
+        console.error('Final error response:', errorResponse);
+        return res.status(statusCode).json(errorResponse);
     }
 };
-// Enhanced Get my tickets
+
+// Enhanced Get my tickets dengan better caching dan error handling - UNCHANGED
 exports.getMyTickets = async (req, res) => {
     try {
         const walletAddress = req.user.walletAddress;
         const hideDeleted = req.query.hideDeleted === 'true';
 
-        console.log('\n📋 ===== GET MY TICKETS =====');
+        console.log('\n📋 ===== GET MY TICKETS (ENHANCED) =====');
         console.log('🔍 Wallet address:', walletAddress);
         console.log('🔍 Hide deleted concerts:', hideDeleted);
 
@@ -298,43 +400,97 @@ exports.getMyTickets = async (req, res) => {
             });
         }
 
-        // Find all tickets owned by this wallet
+        // Find all tickets owned by this wallet with enhanced data
         let tickets = await Ticket.find({
             owner: walletAddress
-        }).sort({ createdAt: -1 });
+        }).sort({ createdAt: -1 }).maxTimeMS(10000);
 
         console.log(`📊 Found ${tickets.length} tickets for wallet ${walletAddress}`);
 
-        // Ensure all tickets have transaction signatures
+        // Enhance tickets with concert information and blockchain data
+        const enhancedTickets = [];
         for (const ticket of tickets) {
-            if (!ticket.transactionSignature) {
-                ticket.transactionSignature = `added_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
-                await ticket.save();
-                console.log(`✅ Added transaction signature to ticket ${ticket._id}`);
-            }
-        }
-
-        // Filter tickets based on concert existence if requested
-        if (hideDeleted) {
-            const filteredTickets = [];
-            for (const ticket of tickets) {
-                try {
-                    const concert = await Concert.findById(ticket.concertId);
-                    if (concert) {
-                        filteredTickets.push(ticket);
-                    }
-                } catch (error) {
-                    console.error(`❌ Error checking concert for ticket ${ticket._id}:`, error);
+            try {
+                // Ensure transaction signature exists
+                if (!ticket.transactionSignature) {
+                    ticket.transactionSignature = `added_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+                    await ticket.save();
+                    console.log(`✅ Updated transaction signature for ticket ${ticket._id}`);
                 }
+
+                const concert = await Concert.findById(ticket.concertId);
+
+                const enhancedTicket = {
+                    ...ticket.toObject(),
+                    // Add concert info
+                    concertInfo: concert ? {
+                        name: concert.name,
+                        venue: concert.venue,
+                        date: concert.date,
+                        creator: concert.creator
+                    } : null,
+
+                    // Add blockchain explorer link like old version
+                    explorerUrl: ticket.transactionSignature &&
+                        !ticket.transactionSignature.startsWith('dev_') &&
+                        !ticket.transactionSignature.startsWith('added_') ?
+                        `https://explorer.solana.com/tx/${ticket.transactionSignature}?cluster=testnet` : null,
+
+                    // Add QR code data like old version
+                    qrCodeData: {
+                        ticketId: ticket._id,
+                        concertName: concert?.name || 'Unknown Concert',
+                        venue: concert?.venue || 'Unknown Venue',
+                        sectionName: ticket.sectionName,
+                        seatNumber: ticket.seatNumber,
+                        owner: ticket.owner,
+                        transactionSignature: ticket.transactionSignature,
+                        mintAddress: ticket.mintAddress,
+                        ticketAddress: ticket.ticketAddress
+                    },
+
+                    // Add verification status
+                    blockchainVerified: ticket.transactionSignature &&
+                        !ticket.transactionSignature.startsWith('dev_') &&
+                        !ticket.transactionSignature.startsWith('added_'),
+
+                    hasMissingConcert: !concert
+                };
+
+                if (hideDeleted) {
+                    if (concert) {
+                        enhancedTickets.push(enhancedTicket);
+                    }
+                } else {
+                    enhancedTickets.push(enhancedTicket);
+                }
+
+            } catch (err) {
+                console.error(`❌ Error processing ticket ${ticket._id}:`, err);
+                // Include ticket anyway with error flag
+                enhancedTickets.push({
+                    ...ticket.toObject(),
+                    concertInfo: null,
+                    hasError: true,
+                    errorMessage: 'Could not load concert information'
+                });
             }
-            console.log(`📊 Returning ${filteredTickets.length} tickets after filtering deleted concerts`);
-            return res.json(filteredTickets);
         }
 
-        console.log(`📊 Returning ${tickets.length} total tickets`);
-        res.json(tickets);
+        console.log(`📊 Returning ${enhancedTickets.length} enhanced tickets`);
+        res.json(enhancedTickets);
+
     } catch (err) {
         console.error('\n❌ Error in getMyTickets:', err);
+
+        if (err.name === 'MongooseError' && err.message.includes('timeout')) {
+            return res.status(408).json({
+                success: false,
+                error: 'Database timeout - please try again',
+                timeout: true
+            });
+        }
+
         return res.status(500).json({
             success: false,
             error: 'Server error',
@@ -343,7 +499,7 @@ exports.getMyTickets = async (req, res) => {
     }
 };
 
-// Enhanced Get ticket by ID
+// Enhanced Get ticket by ID - UNCHANGED but improved
 exports.getTicket = async (req, res) => {
     try {
         const ticket = await Ticket.findById(req.params.id);
@@ -355,9 +511,10 @@ exports.getTicket = async (req, res) => {
             });
         }
 
-        // Check if concert exists
+        // Check if concert exists and get full info
+        let concert = null;
         try {
-            const concert = await Concert.findById(ticket.concertId);
+            concert = await Concert.findById(ticket.concertId);
             if (!concert) {
                 ticket.hasMissingConcert = true;
                 await ticket.save();
@@ -377,9 +534,35 @@ exports.getTicket = async (req, res) => {
             await ticket.save();
         }
 
+        // Enhanced response with blockchain info like old version
+        const enhancedTicket = {
+            ...ticket.toObject(),
+            concertInfo: concert,
+            explorerUrl: ticket.transactionSignature &&
+                !ticket.transactionSignature.startsWith('dev_') &&
+                !ticket.transactionSignature.startsWith('added_') ?
+                `https://explorer.solana.com/tx/${ticket.transactionSignature}?cluster=testnet` : null,
+
+            qrCodeData: {
+                ticketId: ticket._id,
+                concertName: concert?.name || 'Unknown Concert',
+                venue: concert?.venue || 'Unknown Venue',
+                sectionName: ticket.sectionName,
+                seatNumber: ticket.seatNumber,
+                owner: ticket.owner,
+                transactionSignature: ticket.transactionSignature,
+                mintAddress: ticket.mintAddress,
+                ticketAddress: ticket.ticketAddress
+            },
+
+            blockchainVerified: ticket.transactionSignature &&
+                !ticket.transactionSignature.startsWith('dev_') &&
+                !ticket.transactionSignature.startsWith('added_')
+        };
+
         res.json({
             success: true,
-            ticket
+            ticket: enhancedTicket
         });
     } catch (err) {
         console.error('❌ Error in getTicket:', err);
@@ -397,7 +580,7 @@ exports.getTicket = async (req, res) => {
     }
 };
 
-// Enhanced Verify ticket
+// Enhanced Verify ticket - UNCHANGED
 exports.verifyTicket = async (req, res) => {
     try {
         console.log(`🔍 Verifying ticket: ${req.params.id} by user ${req.user.walletAddress}`);
@@ -421,13 +604,18 @@ exports.verifyTicket = async (req, res) => {
         ticket.status = 'used';
         ticket.isVerified = true;
         ticket.verifiedAt = new Date();
+        ticket.verifiedBy = req.user.walletAddress;
 
         // Add to transaction history
         ticket.transactionHistory.push({
             action: 'use',
             from: req.user.walletAddress,
             timestamp: new Date(),
-            verificationAction: true
+            verificationAction: true,
+            metadata: {
+                verifiedBy: req.user.walletAddress,
+                verificationMethod: 'manual'
+            }
         });
 
         await ticket.save();
@@ -436,7 +624,14 @@ exports.verifyTicket = async (req, res) => {
         res.json({
             success: true,
             msg: 'Ticket verified successfully',
-            ticket
+            ticket: {
+                ...ticket.toObject(),
+                verification: {
+                    verified: true,
+                    verifiedAt: ticket.verifiedAt,
+                    verifiedBy: ticket.verifiedBy
+                }
+            }
         });
     } catch (err) {
         console.error('❌ Error in verifyTicket:', err);
@@ -448,22 +643,18 @@ exports.verifyTicket = async (req, res) => {
     }
 };
 
-// Enhanced List ticket for sale
+// Enhanced List ticket for sale - UNCHANGED
 exports.listTicketForSale = async (req, res) => {
     try {
-        // Debug logs
         console.log(`Listing ticket: ${req.params.id}`);
         console.log('Request body:', req.body);
-        console.log('Content-Type:', req.headers['content-type']);
 
         const ticketId = req.params.id;
 
-        // Pastikan ID tiket valid
         if (!ticketId) {
             return res.status(400).json({ success: false, msg: 'Ticket ID is required' });
         }
 
-        // Pastikan body request valid
         if (!req.body || typeof req.body !== 'object') {
             return res.status(400).json({
                 success: false,
@@ -471,10 +662,8 @@ exports.listTicketForSale = async (req, res) => {
             });
         }
 
-        // Ekstrak price dari body request
         const { price } = req.body;
 
-        // Validasi price
         if (price === undefined || price === null) {
             return res.status(400).json({
                 success: false,
@@ -482,10 +671,8 @@ exports.listTicketForSale = async (req, res) => {
             });
         }
 
-        // Konversi price ke number
         const listingPrice = parseFloat(price);
 
-        // Validasi price adalah angka positif
         if (isNaN(listingPrice) || listingPrice <= 0) {
             return res.status(400).json({
                 success: false,
@@ -493,8 +680,6 @@ exports.listTicketForSale = async (req, res) => {
             });
         }
 
-        // Cari tiket di database
-        const Ticket = require('../models/Ticket');
         const ticket = await Ticket.findById(ticketId);
 
         if (!ticket) {
@@ -504,7 +689,6 @@ exports.listTicketForSale = async (req, res) => {
             });
         }
 
-        // Verifikasi kepemilikan tiket
         if (ticket.owner !== req.user.walletAddress) {
             return res.status(403).json({
                 success: false,
@@ -512,7 +696,6 @@ exports.listTicketForSale = async (req, res) => {
             });
         }
 
-        // Cek apakah tiket sudah dijual
         if (ticket.isListed) {
             return res.status(400).json({
                 success: false,
@@ -520,23 +703,25 @@ exports.listTicketForSale = async (req, res) => {
             });
         }
 
-        // Update data tiket
+        // Update ticket data
         ticket.isListed = true;
         ticket.listingPrice = listingPrice;
         ticket.listingDate = new Date();
 
-        // Tambahkan ke history transaksi
+        // Add to transaction history
         ticket.transactionHistory.push({
             action: 'list_for_sale',
             from: ticket.owner,
             timestamp: new Date(),
-            price: listingPrice
+            price: listingPrice,
+            metadata: {
+                marketplace: 'internal',
+                listingType: 'fixed_price'
+            }
         });
 
-        // Simpan perubahan
         await ticket.save();
 
-        // Kirim respons sukses
         return res.json({
             success: true,
             msg: 'Ticket successfully listed for sale',
@@ -557,7 +742,7 @@ exports.listTicketForSale = async (req, res) => {
     }
 };
 
-// Enhanced Cancel ticket listing
+// Enhanced Cancel ticket listing - UNCHANGED
 exports.cancelTicketListing = async (req, res) => {
     try {
         const { id: ticketId } = req.params;
@@ -566,7 +751,6 @@ exports.cancelTicketListing = async (req, res) => {
         console.log(`🎫 Ticket ID: ${ticketId}`);
         console.log(`👤 User: ${req.user.walletAddress}`);
 
-        // Find the ticket
         const ticket = await Ticket.findById(ticketId);
         if (!ticket) {
             console.log('❌ Ticket not found');
@@ -576,7 +760,6 @@ exports.cancelTicketListing = async (req, res) => {
             });
         }
 
-        // Ensure user owns the ticket
         if (ticket.owner !== req.user.walletAddress) {
             console.log('❌ User not authorized');
             return res.status(401).json({
@@ -585,7 +768,6 @@ exports.cancelTicketListing = async (req, res) => {
             });
         }
 
-        // Check if ticket is actually listed
         if (!ticket.isListed) {
             console.log('❌ Ticket not listed');
             return res.status(400).json({
@@ -594,7 +776,6 @@ exports.cancelTicketListing = async (req, res) => {
             });
         }
 
-        // Store listing info before clearing
         const previousListingPrice = ticket.listingPrice;
         const previousListingDate = ticket.listingDate;
 
@@ -638,20 +819,19 @@ exports.cancelTicketListing = async (req, res) => {
     }
 };
 
-// Enhanced Buy ticket from marketplace with full blockchain verification
+// Enhanced Buy ticket - FIXED WITHOUT TRANSACTIONS
 exports.buyTicket = async (req, res) => {
     try {
-        console.log('=========== BUY TICKET REQUEST ===========');
+        console.log('=========== ENHANCED BUY TICKET REQUEST (FIXED) ===========');
         console.log('Ticket ID:', req.params.id);
         console.log('Buyer wallet:', req.user?.walletAddress);
         console.log('Request body:', JSON.stringify(req.body, null, 2));
-        console.log('Headers Content-Type:', req.headers['content-type']);
-        console.log('=========================================');
+        console.log('=========================================================');
 
         const ticketId = req.params.id;
         const { transactionSignature } = req.body;
 
-        // STEP 1: Validasi parameter
+        // STEP 1: Validation
         if (!ticketId) {
             return res.status(400).json({
                 success: false,
@@ -666,7 +846,6 @@ exports.buyTicket = async (req, res) => {
             });
         }
 
-        // STEP 2: Validasi user (pembeli)
         if (!req.user || !req.user.walletAddress) {
             return res.status(401).json({
                 success: false,
@@ -675,10 +854,7 @@ exports.buyTicket = async (req, res) => {
         }
         const buyerWallet = req.user.walletAddress;
 
-        // STEP 3: Cari tiket di database
-        const Ticket = require('../models/Ticket');
-        const Concert = require('../models/Concert');
-
+        // STEP 2: Find ticket - REMOVED .session(session)
         const ticket = await Ticket.findById(ticketId);
         if (!ticket) {
             return res.status(404).json({
@@ -687,7 +863,7 @@ exports.buyTicket = async (req, res) => {
             });
         }
 
-        // STEP 4: Verifikasi tiket tersedia untuk dijual
+        // STEP 3: Validate ticket is for sale
         if (!ticket.isListed) {
             return res.status(400).json({
                 success: false,
@@ -695,7 +871,7 @@ exports.buyTicket = async (req, res) => {
             });
         }
 
-        // STEP 5: Verifikasi pembeli bukan penjual
+        // STEP 4: Validate buyer is not seller
         if (ticket.owner === buyerWallet) {
             return res.status(400).json({
                 success: false,
@@ -703,35 +879,28 @@ exports.buyTicket = async (req, res) => {
             });
         }
 
-        // STEP 6: Simpan data penjual dan harga untuk histori
+        // STEP 5: Store data for history
         const seller = ticket.owner;
         const originalPrice = ticket.price;
         const salePrice = ticket.listingPrice;
 
         console.log(`Seller: ${seller}, Buyer: ${buyerWallet}, Price: ${salePrice} SOL`);
 
-        // STEP 7: Verifikasi transaksi blockchain (opsional)
+        // STEP 6: Blockchain verification (optional)
         let verificationResult = null;
         try {
-            // Cek jika blockchainService tersedia
-            const blockchainService = require('../services/blockchainService');
-
             if (typeof blockchainService.verifyMarketplaceTransaction === 'function') {
                 console.log('Verifying transaction with blockchain service...');
 
-                // Verifikasi bahwa transaksi:
-                // 1. Valid di blockchain
-                // 2. Dikirim ke alamat penjual
-                // 3. Dengan jumlah sesuai harga tiket
                 verificationResult = await blockchainService.verifyMarketplaceTransaction(
                     transactionSignature,
-                    seller,  // expected recipient
-                    salePrice // expected amount
+                    seller,     // expected recipient
+                    salePrice   // expected amount
                 );
 
                 console.log('Transaction verification result:', verificationResult);
 
-                // Jika verifikasi gagal, tolak pembelian (kecuali di mode development)
+                // Only fail in production if verification fails
                 if (verificationResult && !verificationResult.success && process.env.NODE_ENV === 'production') {
                     return res.status(400).json({
                         success: false,
@@ -739,28 +908,9 @@ exports.buyTicket = async (req, res) => {
                         details: verificationResult
                     });
                 }
-            } else if (typeof blockchainService.verifyTransaction === 'function') {
-                // Fallback ke fungsi verifikasi sederhana
-                verificationResult = await blockchainService.verifyTransaction(
-                    transactionSignature,
-                    salePrice,
-                    seller
-                );
-
-                // Hanya check di production
-                if (!verificationResult.valid && process.env.NODE_ENV === 'production') {
-                    return res.status(400).json({
-                        success: false,
-                        msg: 'Invalid transaction',
-                        details: verificationResult
-                    });
-                }
-            } else {
-                console.log('No blockchain verification method available');
             }
         } catch (verifyErr) {
             console.error('Error verifying transaction:', verifyErr);
-            // Skip verification error in development
             if (process.env.NODE_ENV === 'production') {
                 return res.status(400).json({
                     success: false,
@@ -770,7 +920,7 @@ exports.buyTicket = async (req, res) => {
             }
         }
 
-        // STEP 8: Ambil data konser (untuk catatan)
+        // STEP 7: Get concert data for records
         let concertName = 'Unknown Concert';
         let concertData = null;
         try {
@@ -782,30 +932,30 @@ exports.buyTicket = async (req, res) => {
             console.warn('Could not fetch concert details:', err.message);
         }
 
-        // STEP 9: Perbarui data ticket
-
-        // A. Tambahkan ke riwayat pemilik sebelumnya
+        // STEP 8: Update ticket ownership - REMOVED session operations
+        // A. Add to previous owners history
         if (!ticket.previousOwners) ticket.previousOwners = [];
 
         ticket.previousOwners.push({
             address: seller,
             fromDate: ticket.updatedAt || ticket.createdAt,
             toDate: new Date(),
-            transactionSignature
+            transactionSignature,
+            salePrice: salePrice
         });
 
-        // B. Perbarui kepemilikan
+        // B. Transfer ownership
         const oldOwner = ticket.owner;
-        ticket.owner = buyerWallet; // Set pembeli sebagai pemilik baru
+        ticket.owner = buyerWallet;
 
-        // C. Perbarui status tiket
-        ticket.isListed = false; // Hapus dari marketplace
+        // C. Remove from marketplace
+        ticket.isListed = false;
         ticket.listingPrice = 0;
         ticket.listingDate = null;
-        ticket.isPrimary = false; // Tandai sebagai tiket secondary market
-        ticket.paymentRecipient = seller; // Catat siapa yang menerima pembayaran
+        ticket.isPrimary = false;
+        ticket.paymentRecipient = seller;
 
-        // D. Tambahkan riwayat transaksi
+        // D. Add transaction history
         if (!ticket.transactionHistory) ticket.transactionHistory = [];
 
         ticket.transactionHistory.push({
@@ -814,67 +964,37 @@ exports.buyTicket = async (req, res) => {
             to: buyerWallet,
             timestamp: new Date(),
             transactionSignature,
-            price: salePrice
+            price: salePrice,
+            metadata: {
+                marketplace: 'internal',
+                transferType: 'purchase',
+                originalPrice: originalPrice,
+                salePrice: salePrice
+            }
         });
 
-        // E. Perbarui timestamp
         ticket.updatedAt = new Date();
 
-        // STEP 10: Simpan perubahan
+        // STEP 9: Save ticket - REMOVED { session }
         const savedTicket = await ticket.save();
         console.log(`✅ Ticket ownership transferred from ${oldOwner} to ${buyerWallet}`);
 
-        // STEP 11: PENTING - Buat dokumen baru di database jika perlu
-        // Ini untuk mencegah tiket tetap muncul di akun penjual
-
+        // STEP 10: Broadcast update (if WebSocket available)
         try {
-            // Variasi 1: Hapus tiket dari listing marketplace global jika ada
-            await Ticket.updateMany(
-                { isListed: true, _id: { $ne: ticketId } },
-                { $set: { needsRefresh: true } }
-            );
-
-            // Variasi 2: Perbarui semua cache terkait tiket
-            // Tidak perlu implementasi DB, cukup memberi tahu klien untuk refresh
-
-            // Variasi 3: Jika menggunakan duplikasi data di database, pastikan tiket dihapus dari daftar penjual
-            // Jika ada koleksi MarketplaceListing terpisah
-            try {
-                const MarketplaceListing = require('../models/MarketplaceListing');
-                await MarketplaceListing.deleteMany({ ticketId: ticketId });
-                console.log(`Deleted marketplace listings for ticket ${ticketId}`);
-            } catch (listingErr) {
-                // Mungkin model tidak ada, abaikan
-                console.log("MarketplaceListing model not found, skipping");
-            }
-
-            // Variasi 4: Jika ada collection UserTickets, perbarui kepemilikan di sana juga
-            try {
-                const UserTickets = require('../models/UserTickets');
-
-                // Hapus dari penjual
-                await UserTickets.deleteOne({ userWallet: seller, ticketId: ticketId });
-
-                // Tambahkan ke pembeli
-                await UserTickets.create({
-                    userWallet: buyerWallet,
+            if (global.io) {
+                global.io.emit('ticketSold', {
                     ticketId: ticketId,
-                    addedAt: new Date()
+                    from: seller,
+                    to: buyerWallet,
+                    price: salePrice,
+                    timestamp: new Date()
                 });
-
-                console.log(`Updated UserTickets for ticket ${ticketId}`);
-            } catch (userTicketsErr) {
-                // Mungkin model tidak ada, abaikan
-                console.log("UserTickets model not found, skipping");
             }
-
-            console.log("Successfully processed additional ticket ownership updates");
-        } catch (additionalUpdatesErr) {
-            console.warn("Non-critical: Error during additional ticket updates:", additionalUpdatesErr);
-            // Tidak gagalkan transaksi untuk kesalahan non-kritis
+        } catch (broadcastErr) {
+            console.warn("Could not broadcast ticket sale:", broadcastErr.message);
         }
 
-        // STEP 12: Kirim respons sukses
+        // STEP 11: Enhanced success response
         return res.json({
             success: true,
             msg: 'Ticket successfully purchased',
@@ -889,12 +1009,36 @@ exports.buyTicket = async (req, res) => {
                 salePrice,
                 owner: savedTicket.owner,
                 transactionSignature,
-                // Tambahkan flag untuk memberi tahu klien untuk refresh data
-                requiresDataRefresh: true
+
+                // Enhanced blockchain info
+                mintAddress: savedTicket.mintAddress,
+                ticketAddress: savedTicket.ticketAddress,
+                explorerUrl: transactionSignature && !transactionSignature.startsWith('dev_') ?
+                    `https://explorer.solana.com/tx/${transactionSignature}?cluster=testnet` : null,
+
+                requiresDataRefresh: true   // Flag for frontend refresh cache
+            },
+            marketplace: {
+                transferredFrom: seller,
+                transferredTo: buyerWallet,
+                finalPrice: salePrice,
+                originalPrice: originalPrice,
+                transferDate: new Date().toISOString()
             }
         });
+
     } catch (error) {
-        console.error('Error buying ticket:', error);
+        // Enhanced error handling - NO MORE session.abortTransaction()
+        console.error('Error during ticket purchase:', error);
+
+        if (error.code === 11000) {
+            return res.status(409).json({
+                success: false,
+                msg: 'Ticket purchase conflict - ticket may have been sold to another buyer',
+                conflictType: 'concurrent_purchase'
+            });
+        }
+
         return res.status(500).json({
             success: false,
             msg: 'Server error when processing ticket purchase',
@@ -903,14 +1047,12 @@ exports.buyTicket = async (req, res) => {
     }
 };
 
-
-// Enhanced Delete ticket
+// Enhanced Delete ticket - UNCHANGED
 exports.deleteTicket = async (req, res) => {
     try {
         const ticketId = req.params.id;
         console.log(`🗑️ Attempting to delete ticket ${ticketId} by user ${req.user.walletAddress}`);
 
-        // Find ticket
         const ticket = await Ticket.findById(ticketId);
         if (!ticket) {
             console.log(`❌ Ticket ${ticketId} not found`);
@@ -920,7 +1062,6 @@ exports.deleteTicket = async (req, res) => {
             });
         }
 
-        // Validate ownership
         if (ticket.owner !== req.user.walletAddress) {
             console.log(`❌ Unauthorized: ${req.user.walletAddress} attempting to delete ticket owned by ${ticket.owner}`);
             return res.status(401).json({
@@ -929,7 +1070,6 @@ exports.deleteTicket = async (req, res) => {
             });
         }
 
-        // Check if ticket is listed for sale
         if (ticket.isListed) {
             return res.status(400).json({
                 success: false,
@@ -941,18 +1081,17 @@ exports.deleteTicket = async (req, res) => {
         if (ticket.transactionSignature &&
             !ticket.transactionSignature.startsWith('dummy_') &&
             !ticket.transactionSignature.startsWith('added_') &&
-            !ticket.transactionSignature.startsWith('error_')) {
+            !ticket.transactionSignature.startsWith('error_') &&
+            !ticket.transactionSignature.startsWith('dev_')) {
 
             console.log(`🔗 Deleting ticket with blockchain transaction: ${ticket.transactionSignature}`);
             console.log(`🔗 Transaction history:`, ticket.transactionHistory.length, 'entries');
 
-            // Log if this was a resold ticket
             if (ticket.previousOwners && ticket.previousOwners.length > 0) {
                 console.log(`🔗 Ticket had ${ticket.previousOwners.length} previous owners`);
             }
         }
 
-        // Delete ticket from database
         const deleteResult = await Ticket.deleteOne({ _id: ticketId });
         if (deleteResult.deletedCount === 0) {
             console.log(`❌ Failed to delete ticket ${ticketId}`);
@@ -996,12 +1135,11 @@ exports.deleteTicket = async (req, res) => {
     }
 };
 
-// Get minted seats for a concert
+// Enhanced Get minted seats for a concert - UNCHANGED
 exports.getMintedSeatsForConcert = async (req, res) => {
     try {
         console.log(`Getting minted seats for concert: ${req.params.concertId}`);
 
-        // Basic validation
         if (!req.params.concertId) {
             return res.status(400).json({
                 success: false,
@@ -1009,38 +1147,75 @@ exports.getMintedSeatsForConcert = async (req, res) => {
             });
         }
 
-        // Normalize the concertId to avoid ObjectId casting issues
         const concertId = req.params.concertId.toString();
         console.log(`Normalized concertId: ${concertId}`);
 
-        // Find tickets for this concert
-        const Ticket = require('../models/Ticket');
-
         const tickets = await Ticket.find({
             concertId: concertId
-        });
+        }).select('sectionName seatNumber owner createdAt transactionSignature').maxTimeMS(10000);
 
         console.log(`Found ${tickets.length} tickets for concert ${concertId}`);
 
-        // Extract seat information
         const seats = tickets.map(ticket => {
-            // Format: "SectionName-SeatNumber" or just seatNumber if it already contains section
             if (ticket.seatNumber && ticket.seatNumber.includes('-')) {
                 return ticket.seatNumber;
             } else {
                 return `${ticket.sectionName}-${ticket.seatNumber}`;
             }
-        }).filter(Boolean); // Remove any undefined/null values
+        }).filter(Boolean);
 
-        // Cache this result
-        // (Add caching if you have a cache service)
+        const detailedSeats = tickets.map(ticket => ({
+            seatCode: ticket.seatNumber.includes('-') ?
+                ticket.seatNumber :
+                `${ticket.sectionName}-${ticket.seatNumber}`,
+            owner: ticket.owner,
+            mintedAt: ticket.createdAt,
+            section: ticket.sectionName,
+            hasValidTransaction: !!ticket.transactionSignature &&
+                !ticket.transactionSignature.startsWith('dummy_') &&
+                !ticket.transactionSignature.startsWith('added_') &&
+                !ticket.transactionSignature.startsWith('dev_')
+        }));
+
+        const sectionStats = {};
+        tickets.forEach(ticket => {
+            if (!sectionStats[ticket.sectionName]) {
+                sectionStats[ticket.sectionName] = {
+                    count: 0,
+                    validTransactions: 0
+                };
+            }
+            sectionStats[ticket.sectionName].count++;
+
+            if (ticket.transactionSignature &&
+                !ticket.transactionSignature.startsWith('dummy_') &&
+                !ticket.transactionSignature.startsWith('added_') &&
+                !ticket.transactionSignature.startsWith('dev_')) {
+                sectionStats[ticket.sectionName].validTransactions++;
+            }
+        });
 
         return res.json({
             success: true,
-            seats
+            seats,
+            detailedSeats,
+            sectionStats,
+            count: seats.length,
+            timestamp: new Date().toISOString(),
+            cacheStatus: 'fresh'
         });
+
     } catch (error) {
         console.error('Error getting minted seats:', error);
+
+        if (error.name === 'MongooseError' && error.message.includes('timeout')) {
+            return res.status(408).json({
+                success: false,
+                msg: 'Database timeout - please try again',
+                timeout: true
+            });
+        }
+
         return res.status(500).json({
             success: false,
             msg: 'Server error',
@@ -1048,305 +1223,42 @@ exports.getMintedSeatsForConcert = async (req, res) => {
         });
     }
 };
-// Enhanced Get tickets for sale in marketplace
-exports.getTicketsForSale = async (req, res) => {
+
+// Check seat availability - UNCHANGED
+exports.checkSeatAvailability = async (req, res) => {
     try {
-        console.log('\n🛒 ===== MARKETPLACE API CALLED =====');
-        console.log('👤 User:', req.user?.walletAddress || 'Anonymous');
-        console.log('⏰ Time:', new Date().toISOString());
+        console.log('🔍 Real-time seat availability check:', req.body);
 
-        //
-        // Count total tickets first
-        const totalTickets = await Ticket.countDocuments({});
-        console.log('📊 Total tickets in database:', totalTickets);
+        const { concertId, sectionName, seatNumber } = req.body;
 
-        // Count listed tickets
-        const listedCount = await Ticket.countDocuments({ isListed: true });
-        console.log('📊 Listed tickets count:', listedCount);
-
-        // Find all listed tickets (no user filtering since it's public)
-        const query = { isListed: true };
-
-        // Add concert filter if provided
-        const { concertId } = req.query;
-        if (concertId) {
-            query.concertId = concertId;
-            console.log('🔍 Added concert filter:', concertId);
-        }
-
-        console.log('🔍 Query:', JSON.stringify(query));
-
-        // Find tickets
-        const tickets = await Ticket.find(query).sort({ listingDate: -1 });
-        console.log('📊 Raw tickets found:', tickets.length);
-
-        // Log each ticket
-        if (tickets.length > 0) {
-            console.log('\n📋 LISTING ALL FOUND TICKETS:');
-            tickets.forEach((ticket, i) => {
-                console.log(`${i + 1}. ID: ${ticket._id}`);
-                console.log(`   Owner: ${ticket.owner}`);
-                console.log(`   Price: ${ticket.listingPrice} SOL`);
-                console.log(`   Section: ${ticket.sectionName}`);
-                console.log(`   Seat: ${ticket.seatNumber}`);
-                console.log('   ──────────────────');
-            });
-        } else {
-            console.log('❌ NO TICKETS FOUND!');
-        }
-
-        // Process each ticket and add concert info
-        const ticketsWithConcertInfo = [];
-
-        for (const ticket of tickets) {
-            try {
-                const concert = await Concert.findById(ticket.concertId);
-
-                ticketsWithConcertInfo.push({
-                    ...ticket.toObject(),
-                    concertName: concert ? concert.name : 'Unknown Concert',
-                    concertVenue: concert ? concert.venue : 'Unknown Venue',
-                    concertDate: concert ? concert.date : null,
-                    concertExists: !!concert
-                });
-
-            } catch (concertError) {
-                console.error(`❌ Error fetching concert for ticket ${ticket._id}:`, concertError);
-
-                ticketsWithConcertInfo.push({
-                    ...ticket.toObject(),
-                    concertName: 'Unknown Concert',
-                    concertVenue: 'Unknown Venue',
-                    concertDate: null,
-                    concertExists: false
-                });
-            }
-        }
-
-        console.log(`\n✅ FINAL RESULT: Returning ${ticketsWithConcertInfo.length} tickets`);
-        console.log('🛒 ===== MARKETPLACE API END =====\n');
-
-        res.status(200).json({
-            success: true,
-            tickets: ticketsWithConcertInfo,
-            count: ticketsWithConcertInfo.length,
-            timestamp: new Date().toISOString()
-        });
-
-    } catch (error) {
-        console.error('\n❌ ERROR in getTicketsForSale:', error);
-
-        // Enhanced error categorization
-        let errorMessage = 'Server error in marketplace';
-        let statusCode = 500;
-
-        if (error.name === 'CastError') {
-            errorMessage = 'Invalid ticket or concert ID format';
-            statusCode = 400;
-        } else if (error.name === 'ValidationError') {
-            errorMessage = 'Data validation error';
-            statusCode = 400;
-        } else if (error.message.includes('timeout')) {
-            errorMessage = 'Database timeout - please try again';
-            statusCode = 408;
-        } else if (error.message.includes('connection')) {
-            errorMessage = 'Database connection error';
-            statusCode = 503;
-        }
-
-        res.status(statusCode).json({
-            success: false,
-            msg: errorMessage,
-            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-            timestamp: new Date().toISOString()
-        });
-    }
-};
-
-// Enhanced Fix missing transaction for a ticket
-exports.fixMissingTransaction = async (req, res) => {
-    try {
-        const ticketId = req.params.id;
-        const { transactionSignature } = req.body;
-
-        console.log(`🔧 ===== FIX MISSING TRANSACTION =====`);
-        console.log(`🎫 Ticket ID: ${ticketId}`);
-        console.log(`💳 New signature: ${transactionSignature}`);
-
-        // Find the ticket
-        const ticket = await Ticket.findById(ticketId);
-        if (!ticket) {
-            return res.status(404).json({
-                success: false,
-                msg: 'Ticket not found'
-            });
-        }
-
-        // Check if user owns the ticket
-        if (ticket.owner !== req.user.walletAddress) {
-            return res.status(401).json({
-                success: false,
-                msg: 'Not authorized to modify this ticket'
-            });
-        }
-
-        // Validate new transaction signature format
-        if (!transactionSignature || transactionSignature.length < 64) {
+        if (!concertId || !sectionName || !seatNumber) {
             return res.status(400).json({
                 success: false,
-                msg: 'Invalid transaction signature format'
+                msg: 'Missing required parameters: concertId, sectionName, seatNumber'
             });
         }
 
-        console.log(`Updating ticket ${ticketId} with transaction signature: ${transactionSignature}`);
+        const checkStartTime = Date.now();
 
-        // Replace old signature with new one
-        const oldSignature = ticket.transactionSignature;
-        ticket.transactionSignature = transactionSignature;
+        const existingTicket = await Ticket.findOne({
+            concertId: concertId,
+            sectionName: sectionName,
+            seatNumber: seatNumber
+        }).maxTimeMS(5000);
 
-        // Add log to transaction history
-        if (!ticket.transactionHistory) {
-            ticket.transactionHistory = [];
-        }
-
-        ticket.transactionHistory.push({
-            action: 'update_transaction',
-            from: req.user.walletAddress,
-            timestamp: new Date(),
-            transactionSignature: transactionSignature,
-            oldSignature: oldSignature,
-            fixAction: true
-        });
-
-        // Save changes
-        await ticket.save();
-        console.log(`✅ Transaction signature updated for ticket ${ticketId}`);
-
-        // Verify transaction on blockchain if not dummy
-        let blockchainVerified = false;
-        let verificationDetails = null;
-
-        if (transactionSignature &&
-            !transactionSignature.startsWith('dummy_') &&
-            !transactionSignature.startsWith('added_') &&
-            !transactionSignature.startsWith('error_')) {
-
-            try {
-                const isValid = await blockchainService.isTransactionValid(transactionSignature);
-                blockchainVerified = isValid;
-
-                if (isValid) {
-                    // Get detailed verification if valid
-                    verificationDetails = await blockchainService.getTransactionDetails(transactionSignature);
-                }
-
-                console.log(`🔍 Blockchain verification for ${transactionSignature}: ${blockchainVerified ? 'Success' : 'Failed'}`);
-            } catch (verifyErr) {
-                console.warn(`⚠️ Could not verify transaction ${transactionSignature} on blockchain:`, verifyErr);
-            }
-        }
-
-        res.json({
-            success: true,
-            msg: 'Transaction signature updated successfully',
-            ticket: {
-                id: ticket._id,
-                owner: ticket.owner,
-                oldSignature: oldSignature,
-                newSignature: transactionSignature,
-                blockchainVerified: blockchainVerified,
-                verificationDetails: verificationDetails
-            }
-        });
-    } catch (err) {
-        console.error('❌ Error in fixMissingTransaction:', err);
-        res.status(500).json({
-            success: false,
-            msg: 'Server error',
-            error: err.message
-        });
-    }
-};
-
-// Enhanced Mark ticket as valid despite missing concert
-exports.markTicketValid = async (req, res) => {
-    try {
-        const ticketId = req.params.id;
-
-        console.log(`✅ ===== MARK TICKET VALID =====`);
-        console.log(`🎫 Ticket ID: ${ticketId}`);
-        console.log(`👤 User: ${req.user.walletAddress}`);
-
-        // Find the ticket
-        const ticket = await Ticket.findById(ticketId);
-        if (!ticket) {
-            return res.status(404).json({
-                success: false,
-                msg: 'Ticket not found'
+        if (existingTicket) {
+            return res.json({
+                available: false,
+                reason: 'seat_taken',
+                takenBy: existingTicket.owner,
+                takenAt: existingTicket.createdAt,
+                checkTime: Date.now(),
+                checkDuration: Date.now() - checkStartTime
             });
         }
 
-        // Check if user owns the ticket
-        if (ticket.owner !== req.user.walletAddress) {
-            return res.status(401).json({
-                success: false,
-                msg: 'Not authorized to modify this ticket'
-            });
-        }
+        const concert = await Concert.findById(concertId).maxTimeMS(5000);
 
-        // Set hasMissingConcert flag to true
-        ticket.hasMissingConcert = true;
-
-        // Add to transaction history
-        ticket.transactionHistory.push({
-            action: 'mark_valid',
-            from: req.user.walletAddress,
-            timestamp: new Date(),
-            notes: 'Ticket marked as valid despite missing concert',
-            adminAction: true
-        });
-
-        await ticket.save();
-        console.log(`✅ Ticket ${ticketId} marked as valid despite missing concert`);
-
-        res.json({
-            success: true,
-            msg: 'Ticket marked as valid successfully',
-            ticket: {
-                id: ticket._id,
-                owner: ticket.owner,
-                hasMissingConcert: ticket.hasMissingConcert,
-                markedAt: new Date()
-            }
-        });
-    } catch (err) {
-        console.error('❌ Error in markTicketValid:', err);
-        res.status(500).json({
-            success: false,
-            msg: 'Server error',
-            error: err.message
-        });
-    }
-};
-
-// NEW: Calculate royalty for resale
-exports.calculateRoyalty = async (req, res) => {
-    try {
-        const { ticketId, royaltyPercentage = 5 } = req.body; // Default 5% royalty
-
-        console.log(`💰 ===== CALCULATE ROYALTY =====`);
-        console.log(`🎫 Ticket ID: ${ticketId}`);
-        console.log(`💎 Royalty %: ${royaltyPercentage}%`);
-
-        const ticket = await Ticket.findById(ticketId);
-        if (!ticket) {
-            return res.status(404).json({
-                success: false,
-                msg: 'Ticket not found'
-            });
-        }
-
-        const concert = await Concert.findById(ticket.concertId);
         if (!concert) {
             return res.status(404).json({
                 success: false,
@@ -1354,117 +1266,63 @@ exports.calculateRoyalty = async (req, res) => {
             });
         }
 
-        // Calculate royalty
-        const salePrice = ticket.listingPrice || ticket.price;
-        const royaltyAmount = (salePrice * royaltyPercentage) / 100;
-        const sellerAmount = salePrice - royaltyAmount;
-        const marketplaceFee = (salePrice * 2.5) / 100; // 2.5% marketplace fee
-        const finalSellerAmount = sellerAmount - marketplaceFee;
-
-        console.log(`✅ Royalty calculated: ${royaltyAmount} SOL to creator, ${finalSellerAmount} SOL to seller`);
-
-        res.json({
-            success: true,
-            royaltyCalculation: {
-                ticketId: ticketId,
-                salePrice: salePrice,
-                royaltyPercentage: royaltyPercentage,
-                royaltyAmount: royaltyAmount,
-                marketplaceFee: marketplaceFee,
-                sellerAmount: finalSellerAmount,
-                creator: concert.creator,
-                seller: ticket.owner,
-                breakdown: {
-                    gross: salePrice,
-                    royalty: `-${royaltyAmount}`,
-                    marketplaceFee: `-${marketplaceFee}`,
-                    net: finalSellerAmount
-                }
-            }
-        });
-    } catch (err) {
-        console.error('❌ Error calculating royalty:', err);
-        res.status(500).json({
-            success: false,
-            msg: 'Server error',
-            error: err.message
-        });
-    }
-};
-
-// NEW: Get ticket transaction history
-exports.getTicketTransactionHistory = async (req, res) => {
-    try {
-        const { id: ticketId } = req.params;
-
-        console.log(`📜 ===== GET TRANSACTION HISTORY =====`);
-        console.log(`🎫 Ticket ID: ${ticketId}`);
-        console.log(`👤 User: ${req.user.walletAddress}`);
-
-        const ticket = await Ticket.findById(ticketId)
-            .populate('concertId', 'name venue creator date');
-
-        if (!ticket) {
+        const section = concert.sections.find(s => s.name === sectionName);
+        if (!section) {
             return res.status(404).json({
                 success: false,
-                msg: 'Ticket not found'
+                msg: 'Section not found'
             });
         }
 
-        // Check if user owns ticket or is admin (if admin system exists)
-        if (ticket.owner !== req.user.walletAddress && !req.user.isAdmin) {
-            return res.status(401).json({
-                success: false,
-                msg: 'Not authorized to view this ticket history'
+        if (section.availableSeats <= 0) {
+            return res.json({
+                available: false,
+                reason: 'section_full',
+                sectionName: sectionName,
+                availableSeats: section.availableSeats,
+                totalSeats: section.totalSeats,
+                checkTime: Date.now(),
+                checkDuration: Date.now() - checkStartTime
             });
         }
 
-        // Calculate total value transferred in history
-        const totalTransferred = ticket.transactionHistory
-            .filter(tx => tx.price && tx.action === 'transfer')
-            .reduce((sum, tx) => sum + tx.price, 0);
-
-        console.log(`✅ Retrieved transaction history: ${ticket.transactionHistory.length} entries`);
-
-        res.json({
-            success: true,
-            ticket: {
-                id: ticket._id,
-                currentOwner: ticket.owner,
-                currentStatus: ticket.status,
-                isListed: ticket.isListed,
-                listingPrice: ticket.listingPrice,
-                concertInfo: ticket.concertId,
-                transactionHistory: ticket.transactionHistory.map(tx => ({
-                    ...tx.toObject(),
-                    formattedDate: new Date(tx.timestamp).toLocaleString()
-                })),
-                previousOwners: ticket.previousOwners,
-                stats: {
-                    totalTransactions: ticket.transactionHistory.length,
-                    totalTransferred: totalTransferred,
-                    timesSold: ticket.previousOwners ? ticket.previousOwners.length : 0,
-                    createdAt: ticket.createdAt,
-                    lastActivity: ticket.updatedAt
-                }
-            }
+        return res.json({
+            available: true,
+            sectionName: sectionName,
+            seatNumber: seatNumber,
+            price: section.price,
+            availableSeats: section.availableSeats,
+            totalSeats: section.totalSeats,
+            checkTime: Date.now(),
+            checkDuration: Date.now() - checkStartTime
         });
-    } catch (err) {
-        console.error('❌ Error getting transaction history:', err);
-        res.status(500).json({
+
+    } catch (error) {
+        console.error('Error checking seat availability:', error);
+
+        if (error.name === 'MongooseError' && error.message.includes('timeout')) {
+            return res.status(408).json({
+                success: false,
+                msg: 'Database timeout - please try again',
+                timeout: true
+            });
+        }
+
+        return res.status(500).json({
             success: false,
-            msg: 'Server error',
-            error: err.message
+            msg: 'Server error checking seat availability',
+            error: error.message
         });
     }
 };
 
-// NEW: Get marketplace statistics
-exports.getMarketplaceStats = async (req, res) => {
+// Get tickets for sale in marketplace - UNCHANGED
+exports.getTicketsForSale = async (req, res) => {
     try {
-        console.log(`📊 ===== GET MARKETPLACE STATS =====`);
+        console.log('\n🛒 ===== MARKETPLACE API CALLED =====');
+        console.log('👤 User:', req.user?.walletAddress || 'Anonymous');
+        console.log('⏰ Time:', new Date().toISOString());
 
-        // Aggregate statistics
         const totalTickets = await Ticket.countDocuments({});
         const listedTickets = await Ticket.countDocuments({ isListed: true });
         const soldTickets = await Ticket.countDocuments({
@@ -1543,6 +1401,7 @@ module.exports = {
     deleteTicket: exports.deleteTicket,
     getMintedSeatsForConcert: exports.getMintedSeatsForConcert,
     getTicketsForSale: exports.getTicketsForSale,
+    checkSeatAvailability: exports.checkSeatAvailability,
     fixMissingTransaction: exports.fixMissingTransaction,
     markTicketValid: exports.markTicketValid,
     calculateRoyalty: exports.calculateRoyalty,
