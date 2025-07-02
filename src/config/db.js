@@ -6,8 +6,9 @@ const connectDB = async () => {
     try {
         // Gunakan localhost untuk pengembangan lokal
         // Ini adalah alamat yang benar untuk koneksi antar container dalam Docker
-        const mongoURI = 'mongodb://concert-mongodb:27017/concert_nft_tickets';
-
+        const mongoURI = process.env.MONGO_URI ||
+            'mongodb://concert-mongodb:27017/concert_nft_tickets' ||
+            'mongodb://localhost:27017/concert_nft_tickets';
         console.log(`Mencoba koneksi ke MongoDB: ${mongoURI}`);
 
         const conn = await mongoose.connect(mongoURI, {

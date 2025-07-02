@@ -1316,6 +1316,556 @@ exports.checkSeatAvailability = async (req, res) => {
     }
 };
 
+exports.fixMissingTransaction = async (req, res) => {
+    try {
+        console.log('🔧 ===== FIXING MISSING TRANSACTIONS =====');
+
+        const { ticketId } = req.params;
+        const userWallet = req.user?.walletAddress;
+
+        if (!ticketId) {
+            return res.status(400).json({
+                success: false,
+                msg: 'Ticket ID is required'
+            });
+        }
+
+        const ticket = await Ticket.findById(ticketId);
+        if (!ticket) {
+            return res.status(404).json({
+                success: false,
+                msg: 'Ticket not found'
+            });
+        }
+
+        // Check authorization
+        if (ticket.owner !== userWallet) {
+            return res.status(403).json({
+                success: false,
+                msg: 'Not authorized to fix this ticket'
+            });
+        }
+
+        // Check if transaction signature is missing or dummy
+        const needsFix = !ticket.transactionSignature ||
+            ticket.transactionSignature.startsWith('dummy_') ||
+            ticket.transactionSignature.startsWith('added_') ||
+            ticket.transactionSignature.startsWith('dev_');
+
+        if (!needsFix) {
+            return res.status(400).json({
+                success: false,
+                msg: 'Ticket already has a valid transaction signature'
+            });
+        }
+
+        // Generate new transaction signature
+        const newSignature = `fixed_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+        const oldSignature = ticket.transactionSignature;
+
+        ticket.transactionSignature = newSignature;
+
+        // Add to transaction history
+        ticket.transactionHistory.push({
+            action: 'fix_transaction',
+            from: userWallet,
+            timestamp: new Date(),
+            oldSignature: oldSignature,
+            newSignature: newSignature,
+            metadata: {
+                fixedBy: userWallet,
+                fixedAt: new Date(),
+                reason: 'missing_or_invalid_signature'
+            }
+        });
+
+        await ticket.save();
+
+        console.log(`✅ Fixed transaction signature for ticket ${ticketId}`);
+
+        return res.json({
+            success: true,
+            msg: 'Transaction signature fixed successfully',
+            ticket: {
+                id: ticket._id,
+                oldSignature: oldSignature,
+                newSignature: newSignature,
+                fixedAt: new Date()
+            }
+        });
+
+    } catch (error) {
+        console.error('Error fixing transaction signature:', error);
+        return res.status(500).json({
+            success: false,
+            msg: 'Server error fixing transaction',
+            error: error.message
+        });
+    }
+};
+exports.markTicketValid = async (req, res) => {
+    try {
+        console.log('✅ ===== MARKING TICKET AS VALID =====');
+
+        const { ticketId } = req.params;
+        const userWallet = req.user?.walletAddress;
+
+        const ticket = await Ticket.findById(ticketId);
+        if (!ticket) {
+            return res.status(404).json({
+                success: false,
+                msg: 'Ticket not found'
+            });
+        }
+
+        // Check authorization
+        if (ticket.owner !== userWallet) {
+            return res.status(403).json({
+                success: false,
+                msg: 'Not authorized to validate this ticket'
+            });
+        }
+
+        // Update ticket validation status
+        ticket.isVerified = true;
+        ticket.verifiedAt = new Date();
+        ticket.verifiedBy = userWallet;
+
+        // Add blockchain status if missing
+        if (!ticket.blockchainStatus) {
+            ticket.blockchainStatus = {
+                verified: true,
+                lastVerified: new Date(),
+                verifiedBy: userWallet,
+                verificationMethod: 'manual'
+            };
+        }
+
+        // Add to transaction history
+        ticket.transactionHistory.push({
+            action: 'mark_valid',
+            from: userWallet,
+            timestamp: new Date(),
+            verificationAction: true,
+            metadata: {
+                validatedBy: userWallet,
+                validatedAt: new Date(),
+                method: 'manual_validation'
+            }
+        });
+
+        await ticket.save();
+
+        console.log(`✅ Marked ticket ${ticketId} as valid`);
+
+        return res.json({
+            success: true,
+            msg: 'Ticket marked as valid successfully',
+            ticket: {
+                id: ticket._id,
+                isVerified: ticket.isVerified,
+                verifiedAt: ticket.verifiedAt,
+                verifiedBy: ticket.verifiedBy
+            }
+        });
+
+    } catch (error) {
+        console.error('Error marking ticket as valid:', error);
+        return res.status(500).json({
+            success: false,
+            msg: 'Server error validating ticket',
+            error: error.message
+        });
+    }
+};
+exports.calculateRoyalty = async (req, res) => {
+    try {
+        console.log('💰 ===== CALCULATING ROYALTY =====');
+
+        const { ticketId, royaltyPercentage = 5 } = req.body;
+
+        if (!ticketId) {
+            return res.status(400).json({
+                success: false,
+                msg: 'Ticket ID is required'
+            });
+        }
+
+        const ticket = await Ticket.findById(ticketId);
+        if (!ticket) {
+            return res.status(404).json({
+                success: false,
+                msg: 'Ticket not found'
+            });
+        }
+
+        // Get concert info for creator royalty
+        const concert = await Concert.findById(ticket.concertId);
+        if (!concert) {
+            return res.status(404).json({
+                success: false,
+                msg: 'Concert not found'
+            });
+        }
+
+        const originalPrice = ticket.price;
+        const currentListingPrice = ticket.listingPrice || ticket.price;
+        const royaltyRate = Math.max(0, Math.min(100, parseFloat(royaltyPercentage))) / 100;
+
+        // Calculate royalty based on current listing price
+        const royaltyAmount = currentListingPrice * royaltyRate;
+        const sellerReceives = currentListingPrice - royaltyAmount;
+        const creatorReceives = royaltyAmount;
+
+        const royaltyCalculation = {
+            ticket: {
+                id: ticket._id,
+                originalPrice: originalPrice,
+                currentListingPrice: currentListingPrice,
+                sectionName: ticket.sectionName,
+                seatNumber: ticket.seatNumber
+            },
+            concert: {
+                id: concert._id,
+                name: concert.name,
+                creator: concert.creator
+            },
+            royalty: {
+                percentage: royaltyRate * 100,
+                amount: royaltyAmount,
+                creatorReceives: creatorReceives,
+                sellerReceives: sellerReceives
+            },
+            breakdown: {
+                listingPrice: currentListingPrice,
+                royaltyPercentage: `${royaltyRate * 100}%`,
+                royaltyAmount: royaltyAmount,
+                toCreator: creatorReceives,
+                toSeller: sellerReceives
+            },
+            calculatedAt: new Date()
+        };
+
+        console.log(`✅ Calculated royalty for ticket ${ticketId}:`, royaltyCalculation.breakdown);
+
+        return res.json({
+            success: true,
+            royaltyCalculation: royaltyCalculation
+        });
+
+    } catch (error) {
+        console.error('Error calculating royalty:', error);
+        return res.status(500).json({
+            success: false,
+            msg: 'Server error calculating royalty',
+            error: error.message
+        });
+    }
+};
+
+exports.getTicketTransactionHistory = async (req, res) => {
+    try {
+        console.log('📊 ===== GET TICKET TRANSACTION HISTORY =====');
+
+        const { id: ticketId } = req.params;
+        const userWallet = req.user?.walletAddress;
+
+        const ticket = await Ticket.findById(ticketId);
+        if (!ticket) {
+            return res.status(404).json({
+                success: false,
+                msg: 'Ticket not found'
+            });
+        }
+
+        // Check authorization (owner or previous owner can view history)
+        const isOwner = ticket.owner === userWallet;
+        const isPreviousOwner = ticket.previousOwners?.some(prev => prev.address === userWallet);
+
+        if (!isOwner && !isPreviousOwner) {
+            return res.status(403).json({
+                success: false,
+                msg: 'Not authorized to view this ticket history'
+            });
+        }
+
+        // Get concert info
+        const concert = await Concert.findById(ticket.concertId);
+
+        // Enhanced transaction history with concert context
+        const enhancedHistory = (ticket.transactionHistory || []).map(tx => ({
+            ...tx.toObject ? tx.toObject() : tx,
+            concertName: concert?.name || 'Unknown Concert',
+            venue: concert?.venue || 'Unknown Venue',
+            ticketInfo: {
+                sectionName: ticket.sectionName,
+                seatNumber: ticket.seatNumber,
+                currentOwner: ticket.owner
+            }
+        }));
+
+        // Add ownership timeline
+        const ownershipTimeline = [];
+
+        // Add initial owner (first mint)
+        if (enhancedHistory.length > 0) {
+            const firstTx = enhancedHistory[0];
+            ownershipTimeline.push({
+                owner: firstTx.to || ticket.owner,
+                fromDate: firstTx.timestamp,
+                toDate: null,
+                action: 'minted',
+                transactionSignature: firstTx.transactionSignature
+            });
+        }
+
+        // Add previous owners
+        if (ticket.previousOwners && ticket.previousOwners.length > 0) {
+            ticket.previousOwners.forEach(prevOwner => {
+                ownershipTimeline.push({
+                    owner: prevOwner.address,
+                    fromDate: prevOwner.fromDate,
+                    toDate: prevOwner.toDate,
+                    action: 'purchased',
+                    salePrice: prevOwner.salePrice,
+                    transactionSignature: prevOwner.transactionSignature
+                });
+            });
+        }
+
+        // Current owner
+        ownershipTimeline.push({
+            owner: ticket.owner,
+            fromDate: ticket.updatedAt || ticket.createdAt,
+            toDate: null,
+            action: 'current_owner',
+            isCurrent: true
+        });
+
+        const response = {
+            success: true,
+            ticket: {
+                id: ticket._id,
+                concertId: ticket.concertId,
+                concertName: concert?.name || 'Unknown Concert',
+                sectionName: ticket.sectionName,
+                seatNumber: ticket.seatNumber,
+                currentOwner: ticket.owner,
+                originalPrice: ticket.price,
+                currentListingPrice: ticket.listingPrice,
+                isListed: ticket.isListed,
+                status: ticket.status
+            },
+            transactionHistory: enhancedHistory,
+            ownershipTimeline: ownershipTimeline,
+            statistics: {
+                totalTransactions: enhancedHistory.length,
+                totalOwners: ownershipTimeline.length,
+                isResale: (ticket.previousOwners?.length || 0) > 0,
+                createdAt: ticket.createdAt,
+                lastUpdated: ticket.updatedAt
+            },
+            viewedBy: userWallet,
+            viewedAt: new Date()
+        };
+
+        console.log(`✅ Retrieved history for ticket ${ticketId}: ${enhancedHistory.length} transactions`);
+
+        return res.json(response);
+
+    } catch (error) {
+        console.error('Error getting ticket transaction history:', error);
+        return res.status(500).json({
+            success: false,
+            msg: 'Server error getting transaction history',
+            error: error.message
+        });
+    }
+};
+exports.getMarketplaceStats = async (req, res) => {
+    try {
+        console.log('📈 ===== GET MARKETPLACE STATISTICS =====');
+
+        // Use Promise.all for parallel queries with timeout
+        const [
+            totalTickets,
+            listedTickets,
+            soldTickets,
+            avgPriceResult,
+            priceRangeResult,
+            recentActivity,
+            topSections
+        ] = await Promise.all([
+            Ticket.countDocuments({}).maxTimeMS(5000),
+            Ticket.countDocuments({ isListed: true }).maxTimeMS(5000),
+            Ticket.countDocuments({
+                transactionHistory: { $elemMatch: { action: 'transfer' } }
+            }).maxTimeMS(5000),
+
+            // Average listing price
+            Ticket.aggregate([
+                { $match: { isListed: true } },
+                { $group: { _id: null, avgPrice: { $avg: '$listingPrice' } } }
+            ]).maxTimeMS(5000),
+
+            // Price range
+            Ticket.aggregate([
+                { $match: { isListed: true } },
+                { $group: { _id: null, minPrice: { $min: '$listingPrice' }, maxPrice: { $max: '$listingPrice' } } }
+            ]).maxTimeMS(5000),
+
+            // Recent activity (last 24 hours)
+            Ticket.countDocuments({
+                $or: [
+                    { listingDate: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+                    { updatedAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }
+                ]
+            }).maxTimeMS(5000),
+
+            // Top sections by listing count
+            Ticket.aggregate([
+                { $match: { isListed: true } },
+                { $group: { _id: '$sectionName', count: { $sum: 1 }, avgPrice: { $avg: '$listingPrice' } } },
+                { $sort: { count: -1 } },
+                { $limit: 5 }
+            ]).maxTimeMS(5000)
+        ]);
+
+        const avgListingPrice = avgPriceResult.length > 0 ? avgPriceResult[0].avgPrice : 0;
+        const priceRange = priceRangeResult.length > 0 ? priceRangeResult[0] : { minPrice: 0, maxPrice: 0 };
+
+        // Calculate health indicators
+        const listingRate = totalTickets > 0 ? (listedTickets / totalTickets) * 100 : 0;
+        const activityRate = totalTickets > 0 ? (recentActivity / totalTickets) * 100 : 0;
+
+        const isHealthy = listingRate > 5 && listingRate < 50 && activityRate > 0;
+
+        const stats = {
+            overview: {
+                totalTickets,
+                listedTickets,
+                soldTickets,
+                availableTickets: listedTickets,
+                listingRate: parseFloat(listingRate.toFixed(2))
+            },
+            pricing: {
+                averageListingPrice: parseFloat((avgListingPrice || 0).toFixed(4)),
+                priceRange: {
+                    min: priceRange.minPrice || 0,
+                    max: priceRange.maxPrice || 0
+                },
+                currency: 'SOL'
+            },
+            activity: {
+                recentActivity24h: recentActivity,
+                activityRate: parseFloat(activityRate.toFixed(2)),
+                topSections: topSections.map(section => ({
+                    name: section._id,
+                    listedCount: section.count,
+                    averagePrice: parseFloat((section.avgPrice || 0).toFixed(4))
+                }))
+            },
+            health: {
+                isHealthy,
+                indicators: {
+                    hasActiveListings: listedTickets > 0,
+                    hasRecentActivity: recentActivity > 0,
+                    healthyListingRate: listingRate > 5 && listingRate < 50,
+                    priceVariety: (priceRange.maxPrice || 0) > (priceRange.minPrice || 0)
+                }
+            },
+            metadata: {
+                lastCalculated: new Date().toISOString(),
+                calculationDuration: 'real-time',
+                dataFreshness: 'current'
+            }
+        };
+
+        console.log(`✅ Marketplace stats calculated: ${totalTickets} total, ${listedTickets} listed, ${soldTickets} sold`);
+
+        return res.json({
+            success: true,
+            marketplaceStats: stats
+        });
+
+    } catch (error) {
+        console.error('Error getting marketplace stats:', error);
+
+        // Handle timeout specifically
+        if (error.name === 'MongooseError' && error.message.includes('timeout')) {
+            return res.status(408).json({
+                success: false,
+                msg: 'Database timeout calculating marketplace statistics',
+                timeout: true
+            });
+        }
+
+        return res.status(500).json({
+            success: false,
+            msg: 'Server error getting marketplace statistics',
+            error: error.message
+        });
+    }
+};
+exports.mintTicketWithSeatLocking = async (req, res) => {
+    try {
+        console.log('🎫 ===== ENHANCED MINT WITH SEAT LOCKING =====');
+
+        const { concertId, sectionName, seatNumber } = req.body;
+        const userId = req.user?.walletAddress;
+
+        // Get seat locking service
+        const seatLockingService = global.seatLockingService;
+
+        if (!seatLockingService) {
+            console.warn('⚠️ Seat locking service not available, proceeding with regular mint');
+            return exports.mintTicket(req, res);
+        }
+
+        // Check if seat is locked for processing by this user
+        const seatStatus = seatLockingService.checkSeatLockStatus(concertId, sectionName, seatNumber);
+
+        if (seatStatus.locked && seatStatus.lockType === 'processing' && seatStatus.lockedBy !== userId) {
+            return res.status(409).json({
+                success: false,
+                msg: 'Seat is currently being processed by another user',
+                conflict: true,
+                lockType: seatStatus.lockType,
+                processingBy: 'other_user'
+            });
+        }
+
+        // Proceed with regular mint
+        const result = await exports.mintTicket(req, res);
+
+        // If mint was successful, complete the processing
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+            seatLockingService.completeProcessing(concertId, sectionName, seatNumber, userId, true);
+            console.log(`✅ Completed processing for successful mint: ${concertId}-${sectionName}-${seatNumber}`);
+        }
+
+        return result;
+
+    } catch (error) {
+        console.error('Error in enhanced mint with seat locking:', error);
+
+        // Complete processing with failure
+        const { concertId, sectionName, seatNumber } = req.body;
+        const userId = req.user?.walletAddress;
+        const seatLockingService = global.seatLockingService;
+
+        if (seatLockingService && concertId && sectionName && seatNumber && userId) {
+            seatLockingService.completeProcessing(concertId, sectionName, seatNumber, userId, false);
+            console.log(`❌ Completed processing for failed mint: ${concertId}-${sectionName}-${seatNumber}`);
+        }
+
+        return res.status(500).json({
+            success: false,
+            msg: 'Server error during enhanced minting',
+            error: error.message
+        });
+    }
+};
 // Get tickets for sale in marketplace - UNCHANGED
 exports.getTicketsForSale = async (req, res) => {
     try {
@@ -1391,6 +1941,7 @@ exports.getTicketsForSale = async (req, res) => {
 };
 
 module.exports = {
+    // Existing functions
     mintTicket: exports.mintTicket,
     getMyTickets: exports.getMyTickets,
     getTicket: exports.getTicket,
@@ -1402,9 +1953,12 @@ module.exports = {
     getMintedSeatsForConcert: exports.getMintedSeatsForConcert,
     getTicketsForSale: exports.getTicketsForSale,
     checkSeatAvailability: exports.checkSeatAvailability,
+
+    // NEW: Missing functions yang ditambahkan
     fixMissingTransaction: exports.fixMissingTransaction,
     markTicketValid: exports.markTicketValid,
     calculateRoyalty: exports.calculateRoyalty,
     getTicketTransactionHistory: exports.getTicketTransactionHistory,
-    getMarketplaceStats: exports.getMarketplaceStats
+    getMarketplaceStats: exports.getMarketplaceStats,
+    mintTicketWithSeatLocking: exports.mintTicketWithSeatLocking
 };
