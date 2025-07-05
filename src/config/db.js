@@ -1,14 +1,14 @@
-// Perbarui file config/db.js dengan kode berikut
 const mongoose = require('mongoose');
 require('dotenv').config();
 
 const connectDB = async () => {
     try {
-        // Gunakan localhost untuk pengembangan lokal
-        // Ini adalah alamat yang benar untuk koneksi antar container dalam Docker
-        const mongoURI = process.env.MONGO_URI ||
-            'mongodb://concert-mongodb:27017/concert_nft_tickets' ||
-            'mongodb://localhost:27017/concert_nft_tickets';
+        // ✅ TAMBAHAN: Railway priority di awal
+        const mongoURI = process.env.DATABASE_URL ||           // 🆕 Railway
+            process.env.MONGO_URI ||              // Existing
+            'mongodb://concert-mongodb:27017/concert_nft_tickets' ||  // Existing Docker
+            'mongodb://localhost:27017/concert_nft_tickets';          // Existing Local
+
         console.log(`Mencoba koneksi ke MongoDB: ${mongoURI}`);
 
         const conn = await mongoose.connect(mongoURI, {

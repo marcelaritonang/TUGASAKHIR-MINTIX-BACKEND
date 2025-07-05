@@ -1,20 +1,42 @@
-# Dependencies
-node_modules/
+.anchor
+.DS_Store
+target
+**/*.rs.bk
+node_modules
+*/node_modules/
+test-ledger
+.yarn
 
-# Environment variables
+# Environment files (JANGAN backend/ folder!)
 .env
+.env.local
+.env.production
+backend/.env
+app/.env
 
 # Logs
-logs
 *.log
+logs/
+backend/logs/
 
-# Build files
-dist/
+# Build outputs
 build/
+dist/
+*/build/
+*/dist/
 
-# OS files
-.DS_Store
+# Docker volumes
+mongodb_data/
+
+# Uploads (content, bukan folder)
+backend/public/uploads/*
+!backend/public/uploads/.gitkeep
 
 # IDE files
 .vscode/
 .idea/
+
+# Temporary files
+tmp/
+temp/
+*.backup

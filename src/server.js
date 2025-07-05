@@ -22,7 +22,11 @@ connectDB();
 // Essential middleware
 app.use(express.json({ extended: false }));
 app.use(cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    origin: [
+        process.env.FRONTEND_URL || "http://localhost:3000",
+        "http://localhost:3000",
+        "https://tugasakhir-mintix.vercel.app"  // 🆕 URL frontend Anda
+    ],
     credentials: true
 }));
 app.use(session({
@@ -221,13 +225,13 @@ process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
 
 // Start server
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
     console.log('\n🚀 ===== HYBRID SEAT LOCKING SERVER =====');
     console.log(`📡 Server running on port ${PORT}`);
     console.log(`🔗 WebSocket service: ${webSocketService ? 'ACTIVE' : 'INACTIVE'}`);
     console.log(`🔒 Seat locking service: ${seatLockingService ? 'ACTIVE' : 'INACTIVE'}`);
     console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🎯 Platform: ${process.env.RAILWAY_ENVIRONMENT ? 'Railway' : 'Local'}`);
     console.log('🎯 =======================================\n');
 });
-
 module.exports = { app, server, io };

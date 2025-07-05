@@ -1,4 +1,4 @@
-// backend/src/routes/tickets.js - UPDATED VERSION dengan Hybrid Service Integration
+// backend/src/routes/tickets.js - FINAL FIXED VERSION
 const express = require('express');
 const router = express.Router();
 const ticketController = require('../controllers/ticketController');
@@ -7,6 +7,20 @@ const auth = require('../middleware/auth');
 // Get services from global scope (set in server.js)
 const getSeatLockingService = () => global.seatLockingService;
 const getWebSocketService = () => global.webSocketService;
+
+// Helper function for error messages
+const getSeatUnavailableMessage = (reason) => {
+    switch (reason) {
+        case 'seat_locked':
+            return 'This seat is currently selected by another user';
+        case 'processing_conflict':
+            return 'This seat is being processed by another user';
+        case 'already_minted':
+            return 'This seat has already been purchased';
+        default:
+            return 'This seat is not available';
+    }
+};
 
 // Enhanced rate limiting middleware
 const enhancedRateLimit = (req, res, next) => {
@@ -86,23 +100,213 @@ const seatLockMiddleware = async (req, res, next) => {
     next();
 };
 
-// Helper function for error messages
-const getSeatUnavailableMessage = (reason) => {
-    switch (reason) {
-        case 'seat_locked':
-            return 'This seat is currently selected by another user';
-        case 'processing_conflict':
-            return 'This seat is being processed by another user';
-        case 'already_minted':
-            return 'This seat has already been purchased';
-        default:
-            return 'This seat is not available';
+// ✅ DEBUG MIDDLEWARE - untuk tracking request
+router.use((req, res, next) => {
+    console.log(`📍 TICKETS ROUTE HIT: ${req.method} ${req.path}`);
+    console.log(`📍 Original URL: ${req.originalUrl}`);
+    next();
+});
+
+// ==================== PUBLIC ROUTES (NO AUTH) ====================
+
+// ✅ MARKETPLACE - NO AUTH REQUIRED
+router.get('/market', enhancedRateLimit, async (req, res) => {
+    console.log('🏪 MARKETPLACE ROUTE HIT - /api/tickets/market (NO AUTH)');
+
+    try {
+        const Ticket = require('../models/Ticket');
+        const Concert = require('../models/Concert');
+
+        console.log('📊 Fetching tickets with isListed: true');
+
+        const tickets = await Ticket.find({
+            isListed: true,
+            listingPrice: { $exists: true, $gt: 0 }
+        }).sort({ listingDate: -1 });
+
+        console.log(`📊 Found ${tickets.length} tickets listed for sale`);
+
+        if (tickets.length === 0) {
+            console.log('📊 No tickets found in marketplace');
+            return res.json({
+                success: true,
+                tickets: [],
+                count: 0,
+                message: 'No tickets currently listed for sale',
+                timestamp: new Date().toISOString()
+            });
+        }
+
+        const enhancedTickets = await Promise.allSettled(
+            tickets.map(async (ticket) => {
+                try {
+                    const concert = await Concert.findById(ticket.concertId);
+                    return {
+                        ...ticket.toObject(),
+                        concertName: concert?.name || 'Unknown Concert',
+                        concertVenue: concert?.venue || 'Unknown Venue',
+                        concertDate: concert?.date || null,
+                        concertExists: !!concert
+                    };
+                } catch (err) {
+                    console.warn(`Error fetching concert for ticket ${ticket._id}:`, err.message);
+                    return {
+                        ...ticket.toObject(),
+                        concertName: 'Unknown Concert',
+                        concertVenue: 'Unknown Venue',
+                        concertExists: false
+                    };
+                }
+            })
+        );
+
+        const validTickets = enhancedTickets
+            .filter(result => result.status === 'fulfilled')
+            .map(result => result.value);
+
+        console.log(`✅ Returning ${validTickets.length} marketplace tickets`);
+
+        return res.json({
+            success: true,
+            tickets: validTickets,
+            count: validTickets.length,
+            message: `Found ${validTickets.length} tickets for sale`,
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error('❌ Error in marketplace route:', error);
+        return res.status(500).json({
+            success: false,
+            msg: 'Server error loading marketplace',
+            error: error.message
+        });
     }
-};
+});
 
-// ==================== HYBRID SEAT LOCKING ROUTES ====================
+// ✅ MARKETPLACE STATS - NO AUTH REQUIRED
+router.get('/marketplace/stats', enhancedRateLimit, async (req, res) => {
+    console.log('📊 MARKETPLACE STATS ROUTE HIT (NO AUTH)');
 
-// Check seat availability using hybrid service
+    try {
+        const Ticket = require('../models/Ticket');
+
+        // Use countDocuments instead of aggregate for compatibility
+        const totalTickets = await Ticket.countDocuments({});
+        const listedTickets = await Ticket.countDocuments({ isListed: true });
+
+        return res.json({
+            success: true,
+            marketplaceStats: {
+                totalTickets,
+                listedTickets,
+                availableRate: totalTickets > 0 ? ((listedTickets / totalTickets) * 100).toFixed(2) : 0,
+                avgListingPrice: 0.5,
+                priceRange: { min: 0.1, max: 2.0 },
+                isHealthy: true,
+                lastCalculated: new Date().toISOString()
+            }
+        });
+    } catch (error) {
+        console.error('Error in marketplace stats route:', error);
+        return res.status(500).json({
+            success: false,
+            msg: 'Server error in marketplace stats',
+            error: error.message
+        });
+    }
+});
+
+// ✅ HEALTH CHECK - NO AUTH REQUIRED
+router.get('/ping', (req, res) => {
+    console.log('🏥 HEALTH CHECK ROUTE HIT (NO AUTH)');
+
+    const seatLockingService = getSeatLockingService();
+    const webSocketService = getWebSocketService();
+
+    let stats = {};
+    if (seatLockingService) {
+        try {
+            stats = seatLockingService.getSystemStats();
+        } catch (err) {
+            console.error('Error getting seat locking stats:', err);
+        }
+    }
+
+    res.json({
+        success: true,
+        msg: 'Hybrid ticket service is running',
+        status: 'healthy',
+        services: {
+            seatLocking: seatLockingService ? 'active' : 'inactive',
+            webSocket: webSocketService ? 'active' : 'inactive'
+        },
+        locks: stats,
+        version: '3.0.0-hybrid',
+        features: [
+            'hybrid-seat-locking',
+            'real-time-websocket',
+            'conflict-prevention',
+            'automatic-cleanup',
+            'service-integration'
+        ],
+        time: new Date().toISOString()
+    });
+});
+
+// ✅ GET MINTED SEATS - NO AUTH REQUIRED (PUBLIC DATA)
+router.get('/concerts/:concertId/minted-seats', enhancedRateLimit, async (req, res) => {
+    try {
+        console.log('🎭 MINTED SEATS ROUTE HIT (NO AUTH)');
+
+        const concertId = req.params.concertId.toString();
+        const Ticket = require('../models/Ticket');
+
+        const tickets = await Ticket.find({ concertId: concertId })
+            .select('sectionName seatNumber owner createdAt transactionSignature');
+
+        const seats = tickets.map(ticket => {
+            if (ticket.seatNumber && ticket.seatNumber.includes('-')) {
+                return ticket.seatNumber;
+            } else {
+                return `${ticket.sectionName}-${ticket.seatNumber}`;
+            }
+        }).filter(Boolean);
+
+        const detailedSeats = tickets.map(ticket => ({
+            seatCode: ticket.seatNumber.includes('-') ?
+                ticket.seatNumber :
+                `${ticket.sectionName}-${ticket.seatNumber}`,
+            owner: ticket.owner,
+            mintedAt: ticket.createdAt,
+            section: ticket.sectionName,
+            hasValidTransaction: !!ticket.transactionSignature &&
+                !ticket.transactionSignature.startsWith('dummy_') &&
+                !ticket.transactionSignature.startsWith('added_')
+        }));
+
+        return res.json({
+            success: true,
+            seats,
+            detailedSeats,
+            count: seats.length,
+            timestamp: new Date().toISOString(),
+            cacheStatus: 'fresh'
+        });
+
+    } catch (error) {
+        console.error('Error getting minted seats:', error);
+        return res.status(500).json({
+            success: false,
+            msg: 'Server error',
+            error: error.message
+        });
+    }
+});
+
+// ==================== AUTHENTICATED ROUTES (AUTH REQUIRED) ====================
+
+// ✅ SEAT AVAILABILITY CHECK - AUTH REQUIRED
 router.post('/check-seat-availability', auth, enhancedRateLimit, async (req, res) => {
     try {
         const { concertId, sectionName, seatNumber } = req.body;
@@ -122,7 +326,6 @@ router.post('/check-seat-availability', auth, enhancedRateLimit, async (req, res
             });
         }
 
-        // Check status using hybrid service
         const status = seatLockingService.checkSeatLockStatus(concertId, sectionName, seatNumber);
 
         return res.json({
@@ -145,14 +348,13 @@ router.post('/check-seat-availability', auth, enhancedRateLimit, async (req, res
     }
 });
 
-// Reserve seat using hybrid locking service
+// ✅ RESERVE SEAT - AUTH REQUIRED
 router.post('/reserve-seat', auth, enhancedRateLimit, async (req, res) => {
     try {
         const { concertId, sectionName, seatNumber } = req.body;
         const userId = req.user?.walletAddress;
         const seatLockingService = getSeatLockingService();
 
-        // Input validation
         if (!concertId || !sectionName || !seatNumber || !userId) {
             return res.status(400).json({
                 success: false,
@@ -169,7 +371,6 @@ router.post('/reserve-seat', auth, enhancedRateLimit, async (req, res) => {
 
         console.log(`📝 Reserve seat request: ${concertId}-${sectionName}-${seatNumber} by ${userId}`);
 
-        // Use hybrid service for temporary lock
         const lockResult = seatLockingService.lockSeatTemporarily(
             concertId, sectionName, seatNumber, userId
         );
@@ -208,7 +409,7 @@ router.post('/reserve-seat', auth, enhancedRateLimit, async (req, res) => {
     }
 });
 
-// Release seat reservation using hybrid service
+// ✅ RELEASE SEAT - AUTH REQUIRED
 router.delete('/reserve-seat', auth, async (req, res) => {
     try {
         const { concertId, sectionName, seatNumber } = req.body;
@@ -231,7 +432,6 @@ router.delete('/reserve-seat', auth, async (req, res) => {
 
         console.log(`🔓 Release seat request: ${concertId}-${sectionName}-${seatNumber} by ${userId}`);
 
-        // Use hybrid service to unlock
         const unlockResult = seatLockingService.unlockSeat(
             concertId, sectionName, seatNumber, userId
         );
@@ -263,9 +463,7 @@ router.delete('/reserve-seat', auth, async (req, res) => {
     }
 });
 
-// ==================== MAIN TICKET ROUTES ====================
-
-// Mint a ticket with enhanced conflict prevention
+// ✅ MINT TICKET - AUTH REQUIRED
 router.post('/mint', auth, seatLockMiddleware, enhancedRateLimit, async (req, res) => {
     try {
         const { concertId, sectionName, seatNumber } = req.body;
@@ -274,10 +472,8 @@ router.post('/mint', auth, seatLockMiddleware, enhancedRateLimit, async (req, re
 
         console.log(`🎫 Processing mint request: ${concertId}-${sectionName}-${seatNumber} by ${userId}`);
 
-        // Call the mint controller
         await ticketController.mintTicket(req, res);
 
-        // After response is sent, handle processing completion
         res.on('finish', () => {
             if (seatLockingService && concertId && sectionName && seatNumber && userId) {
                 const success = res.statusCode >= 200 && res.statusCode < 300;
@@ -289,7 +485,6 @@ router.post('/mint', auth, seatLockMiddleware, enhancedRateLimit, async (req, re
     } catch (error) {
         console.error('Error in mint route:', error);
 
-        // Complete processing with failure
         const { concertId, sectionName, seatNumber } = req.body;
         const userId = req.user?.walletAddress;
         const seatLockingService = getSeatLockingService();
@@ -306,13 +501,25 @@ router.post('/mint', auth, seatLockMiddleware, enhancedRateLimit, async (req, re
     }
 });
 
-// Get my tickets
+// ✅ GET MY TICKETS - AUTH REQUIRED
 router.get('/', auth, ticketController.getMyTickets);
 
-// Get ticket by ID
-router.get('/:id', auth, ticketController.getTicket);
+// ✅ LIST TICKET FOR SALE - AUTH REQUIRED
+router.post('/:id/list', auth, ticketController.listTicketForSale);
 
-// Get ticket transaction history
+// ✅ CANCEL TICKET LISTING - AUTH REQUIRED
+router.delete('/:id/list', auth, ticketController.cancelTicketListing);
+
+// ✅ BUY TICKET - AUTH REQUIRED
+router.post('/:id/buy', auth, enhancedRateLimit, ticketController.buyTicket);
+
+// ✅ DELETE TICKET - AUTH REQUIRED
+router.delete('/:id', auth, ticketController.deleteTicket);
+
+// ✅ VERIFY TICKET - AUTH REQUIRED
+router.put('/:id/verify', auth, ticketController.verifyTicket);
+
+// ✅ GET TICKET HISTORY - AUTH REQUIRED
 router.get('/:id/history', auth, (req, res) => {
     if (typeof ticketController.getTicketTransactionHistory === 'function') {
         return ticketController.getTicketTransactionHistory(req, res);
@@ -324,301 +531,11 @@ router.get('/:id/history', auth, (req, res) => {
     });
 });
 
-// Verify a ticket (mark as used)
-router.put('/:id/verify', auth, ticketController.verifyTicket);
-
-// ==================== MARKETPLACE ROUTES ====================
-
-// Get tickets available for purchase
-router.get('/market', async (req, res) => {
-    try {
-        if (typeof ticketController.getTicketsForSale === 'function') {
-            return ticketController.getTicketsForSale(req, res);
-        }
-
-        const Ticket = require('../models/Ticket');
-        const Concert = require('../models/Concert');
-
-        const tickets = await Ticket.find({ isListed: true })
-            .sort({ listingDate: -1 })
-            .maxTimeMS(10000);
-
-        const processedTickets = await Promise.allSettled(
-            tickets.map(async (ticket) => {
-                try {
-                    const concert = await Concert.findById(ticket.concertId)
-                        .select('name venue date creator')
-                        .maxTimeMS(3000);
-
-                    return {
-                        ...ticket.toObject(),
-                        concertName: concert ? concert.name : 'Unknown Concert',
-                        concertVenue: concert ? concert.venue : 'Unknown Venue',
-                        concertDate: concert ? concert.date : null,
-                        concertCreator: concert ? concert.creator : null
-                    };
-                } catch (err) {
-                    console.error(`Error fetching concert for ticket ${ticket._id}:`, err);
-                    return {
-                        ...ticket.toObject(),
-                        concertName: 'Unknown Concert',
-                        concertVenue: 'Unknown Venue'
-                    };
-                }
-            })
-        );
-
-        const validTickets = processedTickets
-            .filter(result => result.status === 'fulfilled')
-            .map(result => result.value);
-
-        return res.json({
-            success: true,
-            tickets: validTickets,
-            count: validTickets.length,
-            totalFound: tickets.length,
-            timestamp: new Date().toISOString()
-        });
-
-    } catch (error) {
-        console.error('Error in marketplace route:', error);
-
-        if (error.name === 'MongooseError' && error.message.includes('timeout')) {
-            return res.status(408).json({
-                success: false,
-                msg: 'Database timeout - please try again',
-                timeout: true
-            });
-        }
-
-        return res.status(500).json({
-            success: false,
-            msg: 'Server error in marketplace',
-            error: error.message
-        });
-    }
-});
-
-// Get marketplace statistics
-router.get('/marketplace/stats', async (req, res) => {
-    try {
-        if (typeof ticketController.getMarketplaceStats === 'function') {
-            return ticketController.getMarketplaceStats(req, res);
-        }
-
-        const Ticket = require('../models/Ticket');
-
-        const [totalTickets, listedTickets] = await Promise.all([
-            Ticket.countDocuments({}).maxTimeMS(5000),
-            Ticket.countDocuments({ isListed: true }).maxTimeMS(5000)
-        ]);
-
-        return res.json({
-            success: true,
-            marketplaceStats: {
-                totalTickets,
-                listedTickets,
-                availableRate: totalTickets > 0 ? ((listedTickets / totalTickets) * 100).toFixed(2) : 0,
-                avgListingPrice: 0.5,
-                priceRange: { min: 0.1, max: 2.0 },
-                isHealthy: true,
-                lastCalculated: new Date().toISOString()
-            }
-        });
-    } catch (error) {
-        console.error('Error in marketplace stats route:', error);
-
-        if (error.name === 'MongooseError' && error.message.includes('timeout')) {
-            return res.status(408).json({
-                success: false,
-                msg: 'Database timeout - marketplace stats unavailable',
-                timeout: true
-            });
-        }
-
-        return res.status(500).json({
-            success: false,
-            msg: 'Server error in marketplace stats',
-            error: error.message
-        });
-    }
-});
-
-// List a ticket for sale
-router.post('/:id/list', auth, ticketController.listTicketForSale);
-
-// Cancel a ticket listing
-router.delete('/:id/list', auth, ticketController.cancelTicketListing);
-
-// Buy a ticket from marketplace
-router.post('/:id/buy', auth, enhancedRateLimit, ticketController.buyTicket);
-
-// Delete a ticket
-router.delete('/:id', auth, ticketController.deleteTicket);
-
-// ==================== CONCERT-RELATED ROUTES ====================
-
-// Get all minted seats for a concert
-router.get('/concerts/:concertId/minted-seats', async (req, res) => {
-    try {
-        if (typeof ticketController.getMintedSeatsForConcert === 'function') {
-            return ticketController.getMintedSeatsForConcert(req, res);
-        }
-
-        const concertId = req.params.concertId.toString();
-        const Ticket = require('../models/Ticket');
-
-        const tickets = await Ticket.find({ concertId: concertId })
-            .select('sectionName seatNumber owner createdAt transactionSignature')
-            .maxTimeMS(10000);
-
-        const seats = tickets.map(ticket => {
-            if (ticket.seatNumber && ticket.seatNumber.includes('-')) {
-                return ticket.seatNumber;
-            } else {
-                return `${ticket.sectionName}-${ticket.seatNumber}`;
-            }
-        }).filter(Boolean);
-
-        const detailedSeats = tickets.map(ticket => ({
-            seatCode: ticket.seatNumber.includes('-') ?
-                ticket.seatNumber :
-                `${ticket.sectionName}-${ticket.seatNumber}`,
-            owner: ticket.owner,
-            mintedAt: ticket.createdAt,
-            section: ticket.sectionName,
-            hasValidTransaction: !!ticket.transactionSignature &&
-                !ticket.transactionSignature.startsWith('dummy_') &&
-                !ticket.transactionSignature.startsWith('added_')
-        }));
-
-        return res.json({
-            success: true,
-            seats,
-            detailedSeats,
-            count: seats.length,
-            timestamp: new Date().toISOString(),
-            cacheStatus: 'fresh'
-        });
-
-    } catch (error) {
-        console.error('Error getting minted seats:', error);
-
-        if (error.name === 'MongooseError' && error.message.includes('timeout')) {
-            return res.status(408).json({
-                success: false,
-                msg: 'Database timeout - please try again',
-                timeout: true
-            });
-        }
-
-        return res.status(500).json({
-            success: false,
-            msg: 'Server error',
-            error: error.message
-        });
-    }
-});
-
-// ==================== HYBRID SERVICE STATUS ROUTES ====================
-
-// Get system locks status using hybrid service
-router.get('/system/locks', auth, (req, res) => {
-    try {
-        const seatLockingService = getSeatLockingService();
-
-        if (!seatLockingService) {
-            return res.status(503).json({
-                success: false,
-                msg: 'Seat locking service not available'
-            });
-        }
-
-        const stats = seatLockingService.getSystemStats();
-
-        return res.json({
-            success: true,
-            locks: stats,
-            timestamp: new Date().toISOString()
-        });
-    } catch (error) {
-        console.error('Error getting system locks:', error);
-        return res.status(500).json({
-            success: false,
-            msg: 'Server error',
-            error: error.message
-        });
-    }
-});
-
-// Get locks for specific concert using hybrid service
-router.get('/concerts/:concertId/locks', auth, (req, res) => {
-    try {
-        const { concertId } = req.params;
-        const seatLockingService = getSeatLockingService();
-
-        if (!seatLockingService) {
-            return res.status(503).json({
-                success: false,
-                msg: 'Seat locking service not available'
-            });
-        }
-
-        const locks = seatLockingService.getLocksForConcert(concertId);
-
-        return res.json({
-            success: true,
-            concertId,
-            locks,
-            timestamp: new Date().toISOString()
-        });
-    } catch (error) {
-        console.error('Error getting concert locks:', error);
-        return res.status(500).json({
-            success: false,
-            msg: 'Server error',
-            error: error.message
-        });
-    }
-});
-
-// Force cleanup expired locks using hybrid service
-router.post('/system/cleanup', auth, (req, res) => {
-    try {
-        const seatLockingService = getSeatLockingService();
-
-        if (!seatLockingService) {
-            return res.status(503).json({
-                success: false,
-                msg: 'Seat locking service not available'
-            });
-        }
-
-        const cleanedCount = seatLockingService.cleanupExpiredLocks();
-
-        return res.json({
-            success: true,
-            message: `Cleaned up ${cleanedCount} expired locks`,
-            cleanedCount,
-            timestamp: new Date().toISOString()
-        });
-    } catch (error) {
-        console.error('Error during cleanup:', error);
-        return res.status(500).json({
-            success: false,
-            msg: 'Error during cleanup',
-            error: error.message
-        });
-    }
-});
-
-// ==================== BLOCKCHAIN VERIFICATION ROUTES ====================
-
-// Verify ticket on blockchain
+// ✅ VERIFY BLOCKCHAIN - AUTH REQUIRED
 router.post('/:id/verify-blockchain', auth, async (req, res) => {
     try {
         const Ticket = require('../models/Ticket');
-        const ticket = await Ticket.findById(req.params.id).maxTimeMS(5000);
+        const ticket = await Ticket.findById(req.params.id);
 
         if (!ticket) {
             return res.status(404).json({
@@ -667,15 +584,6 @@ router.post('/:id/verify-blockchain', auth, async (req, res) => {
         });
     } catch (error) {
         console.error('Error in verify-blockchain route:', error);
-
-        if (error.name === 'MongooseError' && error.message.includes('timeout')) {
-            return res.status(408).json({
-                success: false,
-                msg: 'Database timeout - please try again',
-                timeout: true
-            });
-        }
-
         return res.status(500).json({
             success: false,
             msg: 'Server error',
@@ -684,42 +592,125 @@ router.post('/:id/verify-blockchain', auth, async (req, res) => {
     }
 });
 
-// ==================== HEALTH CHECK ROUTES ====================
+// ✅ GET TICKET BY ID - AUTH REQUIRED - MUST BE LAST
+router.get('/:id', auth, (req, res) => {
+    const ticketId = req.params.id;
 
-// Enhanced health check endpoint
-router.get('/ping', (req, res) => {
-    const seatLockingService = getSeatLockingService();
-    const webSocketService = getWebSocketService();
+    console.log(`🎫 TICKET ID ROUTE HIT: ${ticketId}`);
 
-    let stats = {};
-
-    if (seatLockingService) {
-        try {
-            stats = seatLockingService.getSystemStats();
-        } catch (err) {
-            console.error('Error getting seat locking stats:', err);
-        }
+    // ✅ BLOCK known conflicting values
+    if (ticketId === 'market' || ticketId === 'marketplace' || ticketId === 'stats') {
+        console.log(`❌ BLOCKED: Invalid ticket ID "${ticketId}"`);
+        return res.status(400).json({
+            success: false,
+            msg: `Invalid request: "${ticketId}" is not a valid ticket ID`
+        });
     }
 
-    res.json({
-        success: true,
-        msg: 'Hybrid ticket service is running',
-        status: 'healthy',
-        services: {
-            seatLocking: seatLockingService ? 'active' : 'inactive',
-            webSocket: webSocketService ? 'active' : 'inactive'
-        },
-        locks: stats,
-        version: '3.0.0-hybrid',
-        features: [
-            'hybrid-seat-locking',
-            'real-time-websocket',
-            'conflict-prevention',
-            'automatic-cleanup',
-            'service-integration'
-        ],
-        time: new Date().toISOString()
-    });
+    // ✅ VALIDATE ObjectId format
+    const mongoose = require('mongoose');
+    if (!mongoose.Types.ObjectId.isValid(ticketId)) {
+        console.log(`❌ Invalid ObjectId format: ${ticketId}`);
+        return res.status(400).json({
+            success: false,
+            msg: 'Invalid ticket ID format - must be a valid ObjectId'
+        });
+    }
+
+    console.log(`✅ Valid ticket ID: ${ticketId}, proceeding to controller`);
+    ticketController.getTicket(req, res);
+});
+
+// ==================== SYSTEM STATUS ROUTES (AUTH REQUIRED) ====================
+
+// ✅ SYSTEM LOCKS - AUTH REQUIRED
+router.get('/system/locks', auth, (req, res) => {
+    try {
+        const seatLockingService = getSeatLockingService();
+
+        if (!seatLockingService) {
+            return res.status(503).json({
+                success: false,
+                msg: 'Seat locking service not available'
+            });
+        }
+
+        const stats = seatLockingService.getSystemStats();
+
+        return res.json({
+            success: true,
+            locks: stats,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('Error getting system locks:', error);
+        return res.status(500).json({
+            success: false,
+            msg: 'Server error',
+            error: error.message
+        });
+    }
+});
+
+// ✅ CONCERT LOCKS - AUTH REQUIRED
+router.get('/concerts/:concertId/locks', auth, (req, res) => {
+    try {
+        const { concertId } = req.params;
+        const seatLockingService = getSeatLockingService();
+
+        if (!seatLockingService) {
+            return res.status(503).json({
+                success: false,
+                msg: 'Seat locking service not available'
+            });
+        }
+
+        const locks = seatLockingService.getLocksForConcert(concertId);
+
+        return res.json({
+            success: true,
+            concertId,
+            locks,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('Error getting concert locks:', error);
+        return res.status(500).json({
+            success: false,
+            msg: 'Server error',
+            error: error.message
+        });
+    }
+});
+
+// ✅ SYSTEM CLEANUP - AUTH REQUIRED
+router.post('/system/cleanup', auth, (req, res) => {
+    try {
+        const seatLockingService = getSeatLockingService();
+
+        if (!seatLockingService) {
+            return res.status(503).json({
+                success: false,
+                msg: 'Seat locking service not available'
+            });
+        }
+
+        const cleanedCount = seatLockingService.cleanupExpiredLocks();
+
+        return res.json({
+            success: true,
+            message: `Cleaned up ${cleanedCount} expired locks`,
+            cleanedCount,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('Error during cleanup:', error);
+        return res.status(500).json({
+            success: false,
+            msg: 'Error during cleanup',
+            error: error.message
+        });
+    }
 });
 
 module.exports = router;

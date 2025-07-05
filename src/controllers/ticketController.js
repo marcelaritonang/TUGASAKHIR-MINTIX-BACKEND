@@ -502,80 +502,129 @@ exports.getMyTickets = async (req, res) => {
 // Enhanced Get ticket by ID - UNCHANGED but improved
 exports.getTicket = async (req, res) => {
     try {
-        const ticket = await Ticket.findById(req.params.id);
+        const ticketId = req.params.id;
+
+        console.log(`🎫 GET TICKET: ${ticketId} by user: ${req.user?.walletAddress}`);
+
+        // ✅ CRITICAL: Validate ObjectId format before database query
+        if (!mongoose.Types.ObjectId.isValid(ticketId)) {
+            console.log(`❌ Invalid ObjectId format: ${ticketId}`);
+            return res.status(400).json({
+                success: false,
+                msg: 'Invalid ticket ID format'
+            });
+        }
+
+        // Find ticket by ID with timeout
+        const ticket = await Ticket.findById(ticketId).maxTimeMS(10000);
 
         if (!ticket) {
+            console.log(`❌ Ticket not found: ${ticketId}`);
             return res.status(404).json({
                 success: false,
                 msg: 'Ticket not found'
             });
         }
 
-        // Check if concert exists and get full info
-        let concert = null;
+        // Check ownership authorization
+        if (ticket.owner !== req.user.walletAddress) {
+            console.log(`❌ Access denied for ticket ${ticketId}. Owner: ${ticket.owner}, Requester: ${req.user.walletAddress}`);
+            return res.status(403).json({
+                success: false,
+                msg: 'Access denied - not your ticket'
+            });
+        }
+
+        // Enhance ticket with concert information
+        let enhancedTicket = { ...ticket.toObject() };
+
         try {
-            concert = await Concert.findById(ticket.concertId);
-            if (!concert) {
-                ticket.hasMissingConcert = true;
-                await ticket.save();
-            } else if (ticket.hasMissingConcert) {
-                ticket.hasMissingConcert = false;
-                await ticket.save();
+            if (ticket.concertId && mongoose.Types.ObjectId.isValid(ticket.concertId)) {
+                const concert = await Concert.findById(ticket.concertId)
+                    .select('name venue date creator')
+                    .maxTimeMS(5000);
+
+                if (concert) {
+                    enhancedTicket.concertName = concert.name;
+                    enhancedTicket.concertVenue = concert.venue;
+                    enhancedTicket.concertDate = concert.date;
+                    enhancedTicket.concertCreator = concert.creator;
+                    enhancedTicket.concertExists = true;
+                    console.log(`✅ Concert found: ${concert.name}`);
+                } else {
+                    enhancedTicket.concertExists = false;
+                    enhancedTicket.concertName = 'Concert Deleted';
+                    enhancedTicket.concertVenue = 'Unknown Venue';
+                    console.log(`⚠️ Concert ${ticket.concertId} not found`);
+                }
+            } else {
+                enhancedTicket.concertExists = false;
+                enhancedTicket.concertName = 'Invalid Concert ID';
+                enhancedTicket.concertVenue = 'Unknown Venue';
+                console.log(`⚠️ Invalid concert ID: ${ticket.concertId}`);
             }
-        } catch (err) {
-            console.error(`Error finding concert for ticket ${ticket._id}:`, err);
-            ticket.hasMissingConcert = true;
-            await ticket.save();
+        } catch (concertError) {
+            console.warn(`⚠️ Error fetching concert for ticket ${ticketId}:`, concertError.message);
+            enhancedTicket.concertExists = false;
+            enhancedTicket.concertName = 'Concert Lookup Failed';
+            enhancedTicket.concertVenue = 'Unknown Venue';
         }
 
-        // Ensure transaction signature exists
-        if (!ticket.transactionSignature) {
-            ticket.transactionSignature = `added_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
-            await ticket.save();
-        }
+        // Add blockchain verification status
+        const hasValidTransaction = ticket.transactionSignature &&
+            !ticket.transactionSignature.startsWith('dummy_') &&
+            !ticket.transactionSignature.startsWith('added_') &&
+            !ticket.transactionSignature.startsWith('dev_') &&
+            !ticket.transactionSignature.startsWith('error_');
 
-        // Enhanced response with blockchain info like old version
-        const enhancedTicket = {
-            ...ticket.toObject(),
-            concertInfo: concert,
-            explorerUrl: ticket.transactionSignature &&
-                !ticket.transactionSignature.startsWith('dev_') &&
-                !ticket.transactionSignature.startsWith('added_') ?
-                `https://explorer.solana.com/tx/${ticket.transactionSignature}?cluster=testnet` : null,
+        enhancedTicket.blockchainVerified = hasValidTransaction;
+        enhancedTicket.explorerUrl = hasValidTransaction ?
+            `https://explorer.solana.com/tx/${ticket.transactionSignature}?cluster=testnet` : null;
 
-            qrCodeData: {
-                ticketId: ticket._id,
-                concertName: concert?.name || 'Unknown Concert',
-                venue: concert?.venue || 'Unknown Venue',
-                sectionName: ticket.sectionName,
-                seatNumber: ticket.seatNumber,
-                owner: ticket.owner,
-                transactionSignature: ticket.transactionSignature,
-                mintAddress: ticket.mintAddress,
-                ticketAddress: ticket.ticketAddress
-            },
-
-            blockchainVerified: ticket.transactionSignature &&
-                !ticket.transactionSignature.startsWith('dev_') &&
-                !ticket.transactionSignature.startsWith('added_')
+        // Add QR code data
+        enhancedTicket.qrCodeData = {
+            ticketId: ticket._id,
+            concertName: enhancedTicket.concertName,
+            venue: enhancedTicket.concertVenue,
+            sectionName: ticket.sectionName,
+            seatNumber: ticket.seatNumber,
+            owner: ticket.owner,
+            transactionSignature: ticket.transactionSignature,
+            mintAddress: ticket.mintAddress,
+            ticketAddress: ticket.ticketAddress,
+            issuedAt: ticket.createdAt,
+            validUntil: enhancedTicket.concertDate
         };
 
-        res.json({
+        console.log(`✅ Ticket ${ticketId} retrieved successfully`);
+
+        return res.json({
             success: true,
             ticket: enhancedTicket
         });
-    } catch (err) {
-        console.error('❌ Error in getTicket:', err);
-        if (err.kind === 'ObjectId') {
-            return res.status(404).json({
+
+    } catch (error) {
+        console.error(`❌ Error in getTicket for ID ${req.params.id}:`, error);
+
+        // Handle specific MongoDB errors
+        if (error.name === 'CastError') {
+            return res.status(400).json({
                 success: false,
-                msg: 'Ticket not found - invalid ID'
+                msg: 'Invalid ticket ID format'
             });
         }
-        res.status(500).json({
+
+        if (error.name === 'MongooseError' && error.message.includes('timeout')) {
+            return res.status(408).json({
+                success: false,
+                msg: 'Database timeout - please try again'
+            });
+        }
+
+        return res.status(500).json({
             success: false,
-            msg: 'Server error',
-            error: err.message
+            msg: 'Server error retrieving ticket',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };
@@ -1869,73 +1918,181 @@ exports.mintTicketWithSeatLocking = async (req, res) => {
 // Get tickets for sale in marketplace - UNCHANGED
 exports.getTicketsForSale = async (req, res) => {
     try {
-        console.log('\n🛒 ===== MARKETPLACE API CALLED =====');
-        console.log('👤 User:', req.user?.walletAddress || 'Anonymous');
-        console.log('⏰ Time:', new Date().toISOString());
+        const { concertId } = req.query;
 
-        const totalTickets = await Ticket.countDocuments({});
-        const listedTickets = await Ticket.countDocuments({ isListed: true });
-        const soldTickets = await Ticket.countDocuments({
-            transactionHistory: {
-                $elemMatch: { action: 'transfer' }
-            }
-        });
+        console.log(`🏪 GET TICKETS FOR SALE${concertId ? ` for concert: ${concertId}` : ''}`);
+        console.log(`👤 Requested by: ${req.user?.walletAddress || 'Anonymous (Public)'}`);
 
-        // Calculate average listing price
-        const avgPriceResult = await Ticket.aggregate([
-            { $match: { isListed: true } },
-            { $group: { _id: null, avgPrice: { $avg: '$listingPrice' } } }
-        ]);
+        // Build query - only tickets that are actually listed for sale
+        let query = {
+            isListed: true,
+            listingPrice: { $exists: true, $gt: 0 }
+        };
 
-        const avgListingPrice = avgPriceResult.length > 0 ? avgPriceResult[0].avgPrice : 0;
+        // Filter by specific concert if provided
+        if (concertId && mongoose.Types.ObjectId.isValid(concertId)) {
+            query.concertId = concertId;
+            console.log(`🔍 Filtering by concert: ${concertId}`);
+        }
 
-        // Get price range
-        const priceRangeResult = await Ticket.aggregate([
-            { $match: { isListed: true } },
-            {
-                $group: {
-                    _id: null,
-                    minPrice: { $min: '$listingPrice' },
-                    maxPrice: { $max: '$listingPrice' }
+        // Get tickets with timeout
+        const tickets = await Ticket.find(query)
+            .sort({ listingDate: -1 })
+            .maxTimeMS(10000);
+
+        console.log(`📊 Found ${tickets.length} tickets listed for sale`);
+
+        if (tickets.length === 0) {
+            return res.json({
+                success: true,
+                tickets: [],
+                count: 0,
+                message: 'No tickets currently listed for sale',
+                timestamp: new Date().toISOString()
+            });
+        }
+
+        // Enhance tickets with concert information
+        const enhancedTickets = await Promise.allSettled(
+            tickets.map(async (ticket) => {
+                try {
+                    let enhancedTicket = { ...ticket.toObject() };
+
+                    // Initialize concert info
+                    enhancedTicket.concertExists = false;
+                    enhancedTicket.concertName = 'Unknown Concert';
+                    enhancedTicket.concertVenue = 'Unknown Venue';
+                    enhancedTicket.concertDate = null;
+                    enhancedTicket.concertCreator = null;
+
+                    // Try to get concert info
+                    if (ticket.concertId && mongoose.Types.ObjectId.isValid(ticket.concertId)) {
+                        try {
+                            const concert = await Concert.findById(ticket.concertId)
+                                .select('name venue date creator')
+                                .maxTimeMS(3000);
+
+                            if (concert) {
+                                enhancedTicket.concertExists = true;
+                                enhancedTicket.concertName = concert.name;
+                                enhancedTicket.concertVenue = concert.venue;
+                                enhancedTicket.concertDate = concert.date;
+                                enhancedTicket.concertCreator = concert.creator;
+                            } else {
+                                enhancedTicket.concertName = 'Concert Deleted';
+                                enhancedTicket.concertVenue = 'Unknown Venue';
+                            }
+                        } catch (concertErr) {
+                            console.warn(`⚠️ Could not fetch concert ${ticket.concertId}:`, concertErr.message);
+                            enhancedTicket.concertName = 'Concert Lookup Failed';
+                            enhancedTicket.concertVenue = 'Unknown Venue';
+                        }
+                    }
+
+                    // Add blockchain verification status
+                    const hasValidTransaction = ticket.transactionSignature &&
+                        !ticket.transactionSignature.startsWith('dummy_') &&
+                        !ticket.transactionSignature.startsWith('added_') &&
+                        !ticket.transactionSignature.startsWith('dev_') &&
+                        !ticket.transactionSignature.startsWith('error_');
+
+                    enhancedTicket.blockchainVerified = hasValidTransaction;
+                    enhancedTicket.explorerUrl = hasValidTransaction ?
+                        `https://explorer.solana.com/tx/${ticket.transactionSignature}?cluster=testnet` : null;
+
+                    // Add marketplace-specific data
+                    enhancedTicket.marketplaceInfo = {
+                        isForSale: ticket.isListed,
+                        listingPrice: ticket.listingPrice,
+                        listingDate: ticket.listingDate,
+                        seller: ticket.owner,
+                        originalPrice: ticket.price,
+                        markup: ticket.listingPrice > ticket.price ?
+                            ((ticket.listingPrice - ticket.price) / ticket.price * 100).toFixed(2) : 0,
+                        daysSinceListed: ticket.listingDate ?
+                            Math.floor((Date.now() - new Date(ticket.listingDate).getTime()) / (1000 * 60 * 60 * 24)) : 0
+                    };
+
+                    return enhancedTicket;
+
+                } catch (err) {
+                    console.error(`❌ Error enhancing ticket ${ticket._id}:`, err);
+                    // Return original ticket if enhancement fails
+                    return {
+                        ...ticket.toObject(),
+                        concertExists: false,
+                        concertName: 'Processing Error',
+                        concertVenue: 'Unknown Venue',
+                        hasError: true
+                    };
                 }
+            })
+        );
+
+        // Filter successful results and handle errors
+        const validTickets = enhancedTickets
+            .filter(result => result.status === 'fulfilled')
+            .map(result => result.value);
+
+        const failedEnhancements = enhancedTickets
+            .filter(result => result.status === 'rejected')
+            .length;
+
+        if (failedEnhancements > 0) {
+            console.warn(`⚠️ ${failedEnhancements} tickets failed enhancement`);
+        }
+
+        // Sort tickets by listing date (newest first) and then by price (lowest first)
+        validTickets.sort((a, b) => {
+            const dateA = new Date(a.listingDate || 0);
+            const dateB = new Date(b.listingDate || 0);
+            if (dateB.getTime() !== dateA.getTime()) {
+                return dateB.getTime() - dateA.getTime();
             }
-        ]);
-
-        const priceRange = priceRangeResult.length > 0 ? priceRangeResult[0] : { minPrice: 0, maxPrice: 0 };
-
-        // Recent activity (last 24 hours)
-        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        const recentActivity = await Ticket.countDocuments({
-            $or: [
-                { listingDate: { $gte: oneDayAgo } },
-                { updatedAt: { $gte: oneDayAgo } }
-            ]
+            return (a.listingPrice || 0) - (b.listingPrice || 0);
         });
 
-        console.log(`✅ Marketplace stats calculated`);
+        console.log(`✅ Returning ${validTickets.length} enhanced marketplace tickets`);
 
-        res.json({
+        return res.json({
             success: true,
-            marketplaceStats: {
-                totalTickets: totalTickets,
-                listedTickets: listedTickets,
-                soldTickets: soldTickets,
-                availableRate: totalTickets > 0 ? (listedTickets / totalTickets * 100).toFixed(2) : 0,
-                avgListingPrice: parseFloat(avgListingPrice.toFixed(4)),
-                priceRange: {
-                    min: priceRange.minPrice || 0,
-                    max: priceRange.maxPrice || 0
-                },
-                recentActivity: recentActivity,
-                generatedAt: new Date().toISOString()
+            tickets: validTickets,
+            count: validTickets.length,
+            message: `Found ${validTickets.length} tickets for sale`,
+            metadata: {
+                totalFound: tickets.length,
+                successfullyEnhanced: validTickets.length,
+                failedEnhancements: failedEnhancements,
+                timestamp: new Date().toISOString(),
+                requestedBy: req.user?.walletAddress || 'anonymous'
             }
         });
-    } catch (err) {
-        console.error('❌ Error getting marketplace stats:', err);
-        res.status(500).json({
+
+    } catch (error) {
+        console.error('❌ Error getting tickets for sale:', error);
+
+        // Handle specific error types
+        if (error.name === 'MongooseError' && error.message.includes('timeout')) {
+            return res.status(408).json({
+                success: false,
+                msg: 'Database timeout - please try again',
+                timeout: true
+            });
+        }
+
+        if (error.name === 'CastError') {
+            return res.status(400).json({
+                success: false,
+                msg: 'Invalid concert ID format',
+                field: 'concertId'
+            });
+        }
+
+        return res.status(500).json({
             success: false,
-            msg: 'Server error',
-            error: err.message
+            msg: 'Server error getting tickets for sale',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+            timestamp: new Date().toISOString()
         });
     }
 };
